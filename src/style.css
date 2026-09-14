@@ -1,19 +1,35 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { width: 100%; height: 100%; overflow: hidden; background: #0f0c29; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; color: #fff; }
-canvas { display: block; }
-#hud { position: fixed; top: 16px; left: 16px; z-index: 10; pointer-events: none; }
-.panel { background: rgba(20, 16, 50, 0.75); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.15); border-radius: 14px; padding: 16px 20px; min-width: 200px; pointer-events: auto; }
-.title { font-size: 22px; font-weight: 700; margin-bottom: 10px; background: linear-gradient(90deg, #ffd86f, #fc6262, #c471ed); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.row { display: flex; justify-content: space-between; font-size: 16px; margin: 6px 0; }
-.row b { font-size: 18px; color: #ffd86f; }
-#restart, #play-again { margin-top: 10px; width: 100%; padding: 8px 0; border: none; border-radius: 8px; background: linear-gradient(90deg, #fc6262, #c471ed); color: #fff; font-size: 15px; cursor: pointer; }
-#restart:hover, #play-again:hover { filter: brightness(1.15); }
-.hint { margin-top: 10px; font-size: 12px; color: rgba(255,255,255,0.6); line-height: 1.5; }
-#overlay { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.6); }
-#overlay.hidden { display: none; }
-.card { background: rgba(30, 24, 70, 0.95); border: 1px solid rgba(255,255,255,0.2); border-radius: 16px; padding: 32px 48px; text-align: center; }
-.card h1 { margin-bottom: 12px; }
-.card p { font-size: 18px; }
-.card b { color: #ffd86f; font-size: 26px; }
-
-#mute.secondary { background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.2); margin-top: 8px; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0f0c29; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; color: #f5f3ff; }
+canvas { display: block; position: fixed; touch-action: none; }
+#hud { position: fixed; top: 24px; left: 24px; width: 280px; z-index: 10; max-height: calc(100dvh - 48px); overflow: auto; }
+.panel { background: #1a1636e8; border: 1px solid #ffffff20; border-radius: 20px; padding: 22px; }
+.eyebrow { font-size: 10px; letter-spacing: 2px; color: #b4a6dd; margin-bottom: 10px; }
+.title { font-size: 27px; font-weight: 800; color: #ffe1a1; margin-bottom: 18px; }
+.title span { font-size: 11px; vertical-align: middle; background: #ffffff15; padding: 4px 6px; border-radius: 6px; margin-left: 7px; color: #c7b9eb; }
+.hint { font-size: 11px; color: #b4a6cc; }
+select { width: 100%; background: #282041; border: 1px solid #76619e; color: #fff; padding: 9px; border-radius: 9px; margin: 8px 0 18px; }
+h2 { font-size: 16px; margin-bottom: 16px; }
+.stats { display: flex; gap: 10px; margin-bottom: 24px; }
+.stats div { flex: 1; background: #ffffff08; padding: 12px; border-radius: 12px; color: #b8adc9; font-size: 12px; }
+.stats b { display: block; font-size: 30px; color: #ffe1a1; margin-top: 3px; }
+.goal-heading { font-size: 13px; margin-bottom: 14px; }.goal-heading span { color: #a99dbc; font-size: 10px; float: right; }
+.row { display: flex; justify-content: space-between; font-size: 12px; margin: 14px 0; gap: 5px; }
+.row b { color: #dfceff; font-weight: 600; }
+progress { display: block; width: 100%; height: 6px; border: 0; border-radius: 10px; overflow: hidden; background: #39304d; accent-color: #c6a0ff; }
+progress::-webkit-progress-bar { background: #39304d; }progress::-webkit-progress-value { background: linear-gradient(90deg,#9b7ae8,#f6c98e); border-radius: 10px; }
+button { font-family: inherit; border: 1px solid transparent; border-radius: 10px; padding: 10px 12px; background: linear-gradient(120deg,#9966d0,#b65e9a); color: white; font-size: 13px; cursor: pointer; }
+button:hover:enabled { filter: brightness(1.15); }button:disabled { opacity: .4; cursor: not-allowed; }
+button:focus-visible,select:focus-visible,summary:focus-visible { outline: 2px solid #ffe1a1; outline-offset: 3px; }
+.secondary { background: #ffffff0c; border-color: #ffffff20; }
+.actions { display: flex; gap: 8px; margin-top: 22px; }.actions button { flex: 1; padding: 9px 4px; }
+.instructions { margin-top: 18px; font-size: 11px; color: #b4a6cc; line-height: 1.8; }.instructions p { margin-top: 8px; }summary { cursor: pointer; }
+#skillbar { position: fixed; bottom: 14px; left: calc(320px + (100% - 320px) / 2); transform: translateX(-50%); width: min(570px, calc(100% - 344px)); z-index: 10; }
+.energy-row { display: flex; align-items: center; gap: 18px; font-size: 12px; margin-bottom: 10px; }.energy-row span { white-space: nowrap; }.energy-row b { margin-left: 8px; color: #ffe1a1; }.energy-row progress { flex: 1; }
+.skills { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }.skills button { background: #241c40; border: 1px solid #6d508c; font-size: 12px; padding: 8px; }.skills button span { font-size: 19px; margin-right: 6px; }.skills small { display: block; font-size: 10px; color: #bcb0d1; margin-top: 3px; }.skills .active { border-color: #ffe1a1; background: #54406a; box-shadow: 0 0 18px #ffd88833; }
+#status { text-align: center; color: #c1b6d8; font-size: 11px; min-height: 16px; margin-top: 8px; }
+#overlay { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; background: #090617cc; backdrop-filter: blur(7px); }#overlay.hidden { display: none; }
+.card { background: #211a3e; border: 1px solid #887399; border-radius: 22px; padding: 30px; width: min(420px,90%); text-align: center; }.card h1 { margin: 18px 0 8px; font-size: 26px; }.card p { font-size: 14px; line-height: 1.8; margin: 18px 0; color: #c7bdd6; }.card b { color: #ffe1a1; font-size: 26px; }.card button { width: 100%; margin-top: 8px; }#result-stars { font-size: 35px; letter-spacing: 6px; color: #ffdc8a; }#result-detail { min-height: 50px; }
+@media(max-width:760px) {
+ #hud { top: 8px; left: 10px; width: calc(100% - 20px); max-height: 235px; }.panel { padding: 12px 14px; border-radius: 14px; }.eyebrow,.title span,.goal-heading,.instructions { display: none; }.title { font-size: 19px; margin: 0 0 5px; }.hint { display: none; }select { position: absolute; right: 14px; top: 8px; width: 48%; margin: 0; font-size: 11px; padding: 7px; }h2 { font-size: 12px; margin: 0 0 6px; }.stats { position: absolute; right: 14px; top: 49px; width: 44%; margin: 0; gap: 6px; }.stats div { padding: 5px 8px; font-size: 10px; }.stats b { font-size: 22px; }.row { font-size: 11px; margin: 8px 0; }.row:first-of-type { margin-top: 8px; }#score-progress { width: 48%; }.score-row { width: 48%; }.actions { margin-top: 8px; }.actions button { padding: 5px; font-size: 11px; }
+ #skillbar { width: calc(100% - 24px); left: 50%; bottom: 10px; }.skills { gap: 5px; }.skills button { font-size: 11px; padding: 8px 2px; }.skills button span { display: block; margin: 0 0 3px; }#status { min-height: 30px; font-size: 10px; }.energy-row { gap: 10px; }
+}

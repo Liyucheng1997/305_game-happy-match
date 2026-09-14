@@ -3,26 +3,46 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>开心消消乐 · Three.js</title>
+  <title>开心消消乐 v1.1 · 森林冒险</title>
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
-  <div id="hud">
+  <aside id="hud">
     <div class="panel">
-      <div class="title">开心消消乐</div>
-      <div class="row"><span>分数</span><b id="score">0</b></div>
-      <div class="row"><span>步数</span><b id="moves">20</b></div>
-      <div class="row"><span>连击</span><b id="combo">-</b></div>
-      <button id="restart">重新开始</button>
-      <button id="mute" class="secondary">🔊 声音开</button>
-      <div class="hint">点击一个宝石，再点击相邻宝石交换，三个及以上同色连成一线即可消除</div>
+      <div class="eyebrow">FOREST ADVENTURE · 森林冒险</div>
+      <div class="title">开心消消乐<span>v1.1 闯关版</span></div>
+      <label for="level-select" class="hint">冒险地图 · 通关后解锁下一关</label>
+      <select id="level-select" aria-label="选择关卡"></select>
+      <h2 id="level-title"></h2>
+      <div class="stats"><div>剩余步数<b id="moves">26</b></div><div>连锁倍率<b id="combo">-</b></div></div>
+      <div class="goal-heading">本关目标 <span>全部完成即可过关</span></div>
+      <div class="row score-row"><span>✦ 分数</span><span><b id="score">0</b> / <span id="score-target">650</span></span></div>
+      <progress id="score-progress" value="0" max="650" aria-label="分数目标进度"></progress>
+      <div class="row"><span>♡ 动物收集</span><b id="collect-goal"></b></div>
+      <div class="row"><span>❄ 破冰目标</span><b id="ice-goal"></b></div>
+      <div class="actions"><button id="restart">重玩本关</button><button id="mute" class="secondary">🔊 声音开</button></div>
+      <details class="instructions"><summary>玩法与技能说明</summary><p>点击相邻动物交换，横竖三个同类即可消除；无效交换不扣步数。每消除一个动物获得 1 能量，上限 60。</p><p>技能不扣步数，技能及其连锁不产生能量。冰层固定在格子上，消除上面的动物会削掉一层；破冰锤可击碎两层冰。无可用交换时自动免费洗牌。</p><p>步数用完即结算；剩余步数达到初始的 35% / 15% 可获三星 / 二星，否则为一星。少用步数，挑战满星！</p></details>
     </div>
-  </div>
-  <div id="overlay" class="hidden">
+  </aside>
+  <section id="skillbar" aria-label="技能栏">
+    <div class="energy-row"><span>⚡ 魔法能量 <b id="energy">12 / 60</b></span><progress id="energy-progress" value="12" max="60" aria-label="魔法能量"></progress></div>
+    <div class="skills">
+      <button id="skill-hammer" title="清除一格并击碎全部冰层"><span>🔨</span>破冰锤<small>12 能量</small></button>
+      <button id="skill-bomb" title="消除周围 3×3 区域"><span>💥</span>范围炸弹<small>28 能量</small></button>
+      <button id="skill-rainbow" title="消除全盘同类动物"><span>🌈</span>彩虹魔法<small>45 能量</small></button>
+      <button id="skill-shuffle" title="重新生成可消除的棋盘，保留冰层"><span>🔀</span>重新洗牌<small>20 能量</small></button>
+    </div>
+    <p id="status" role="status" aria-live="polite"></p>
+  </section>
+  <div id="overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="result-title">
     <div class="card">
-      <h1>游戏结束</h1>
-      <p>最终得分：<b id="final-score">0</b></p>
-      <button id="play-again">再来一局</button>
+      <div class="eyebrow">FOREST ADVENTURE</div>
+      <h1 id="result-title">关卡通过！</h1>
+      <div id="result-stars"></div>
+      <p id="result-detail"></p>
+      <p>本关得分：<b id="final-score">0</b></p>
+      <button id="next-level">进入下一关 →</button>
+      <button id="play-again" class="secondary">重玩本关</button>
     </div>
   </div>
   <script type="module" src="/src/main.js"></script>

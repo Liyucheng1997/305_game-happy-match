@@ -1,12 +1,13 @@
 import * as THREE from 'three';
+import { LEVELS, SKILLS, skillCells, objectivesMet, starsFor, readProgress, outcomeFor } from './rules.js';
 import { unlock, sfx, setMuted, isMuted } from './audio.js';
 
 // ---------- 配置 ----------
 const ROWS = 8;
 const COLS = 8;
-const TYPES = 6;
+
 const CELL = 1.15;          // 格子间距
-const START_MOVES = 20;
+
 
 const GEM_DEFS = [
   { name: '猫', color: 0xffa23c },
@@ -253,7 +254,42 @@ function updateParticles(dt) {
 
 // ---------- 游戏状态 ----------
 const grid = [];           // grid[r][c] = gem mesh | null
-let score = 0, moves = START_MOVES, busy = false, selected = null, gameOver = false;
+let progress;
+try { progress = readProgress(localStorage.getItem('happy-match3-progress')); }
+catch { progress = readProgress(null); }
+let levelIndex = progress.unlocked - 1;
+let level = LEVELS[levelIndex];
+let score = 0, moves = level.moves, busy = false, selected = null, gameOver = false;
+let energy = 0, collected = 0, activeSkill = null, won = false;
+let ice = Array(ROWS * COLS).fill(0);
+const iceGroup = new THREE.Group();
+scene.add(iceGroup);
+const iceGeometry = new THREE.PlaneGeometry(CELL * 0.92, CELL * 0.92);
+const iceMaterials = [null,
+  new THREE.MeshBasicMaterial({ color: 0x8be7ff, transparent: true, opacity: 0.32, depthWrite: false }),
+  new THREE.MeshBasicMaterial({ color: 0xb9cfff, transparent: true, opacity: 0.62, depthWrite: false })];
+function renderIce() {
+  iceGroup.clear();
+  ice.forEach((layers, i) => {
+    if (!layers) return;
+    const tile = new THREE.Mesh(iceGeometry, iceMaterials[layers]);
+    tile.position.set(colX(i % COLS), rowY(Math.floor(i / COLS)), 0.67);
+    iceGroup.add(tile);
+  });
+}
+function setupIce() {
+  ice.fill(0);
+  const cells = Array.from({ length: ROWS * COLS }, (_, i) => i);
+  for (let i = cells.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [cells[i], cells[j]] = [cells[j], cells[i]];
+  }
+  cells.slice(0, level.iceCount).forEach(i => { ice[i] = level.iceLayers; });
+  renderIce();
+}
+const iceLeft = () => ice.reduce((a, b) => a + b, 0);
+function notice(message) { $('status').textContent = message; }
+
 const gemGroup = new THREE.Group();
 scene.add(gemGroup);
 
@@ -262,6 +298,23 @@ function updateHUD(combo) {
   $('score').textContent = score;
   $('moves').textContent = moves;
   $('combo').textContent = combo > 1 ? `x${combo}` : '-';
+  $('level-title').textContent = `第 ${level.id} 关 · ${level.name}`;
+  $('score-target').textContent = level.targetScore;
+  $('score-progress').value = Math.min(score, level.targetScore);
+  $('score-progress').max = level.targetScore;
+  $('collect-goal').textContent = level.collect ? `${GEM_DEFS[level.collectType].name} ${Math.min(collected, level.collect)} / ${level.collect}` : '本关无需收集';
+  $('ice-goal').textContent = level.iceCount ? `剩余 ${iceLeft()} 层冰` : '本关没有冰层';
+  $('energy').textContent = `${energy} / 60`;
+  $('energy-progress').value = energy;
+  for (const [kind, skill] of Object.entries(SKILLS)) {
+    const button = $(`skill-${kind}`);
+    button.disabled = busy || gameOver || energy < skill.cost;
+    button.classList.toggle('active', activeSkill === kind);
+    button.setAttribute('aria-pressed', String(activeSkill === kind));
+  }
+  $('restart').disabled = busy;
+  $('level-select').disabled = busy;
+
 }
 
 function makeGem(type, r, c) {
@@ -279,7 +332,7 @@ function randomTypeNoMatch(r, c) {
   if (r >= 2 && grid[r - 1][c] && grid[r - 2][c] && grid[r - 1][c].userData.type === grid[r - 2][c].userData.type)
     banned.add(grid[r - 1][c].userData.type);
   let t;
-  do { t = Math.floor(Math.random() * TYPES); } while (banned.has(t));
+  do { t = Math.floor(Math.random() * level.types); } while (banned.has(t));
   return t;
 }
 
@@ -356,9 +409,13 @@ async function animateToCell(...gems) {
   await Promise.all(gems.map(g => tween(g.position, { x: colX(g.userData.c), y: rowY(g.userData.r) }, 0.22)));
 }
 
-async function removeMatches(matched, combo) {
+async function removeMatches(matched, combo, charge = true, shatter = false) {
   const gems = [...matched].map(i => grid[Math.floor(i / COLS)][i % COLS]);
   score += gems.length * 10 * combo;
+  if (charge) energy = Math.min(60, energy + gems.length);
+  collected += gems.filter(g => g.userData.type === level.collectType).length;
+  for (const i of matched) ice[i] = Math.max(0, ice[i] - (shatter ? 2 : 1));
+  renderIce();
   updateHUD(combo);
   sfx.pop(combo, gems.length);
   await Promise.all(gems.map(g => {
@@ -385,7 +442,7 @@ async function applyGravityAndRefill() {
     // 补充新宝石
     let spawn = 1;
     for (let r = write; r >= 0; r--, spawn++) {
-      const g = makeGem(Math.floor(Math.random() * TYPES), r, c);
+      const g = makeGem(Math.floor(Math.random() * level.types), r, c);
       g.position.y = rowY(0) + spawn * CELL + 0.5;
       grid[r][c] = g;
       anims.push(tween(g.position, { y: rowY(r) }, 0.45 + spawn * 0.05, { ease: easeOutBounce }));
@@ -395,17 +452,18 @@ async function applyGravityAndRefill() {
   sfx.land();
 }
 
-async function resolveBoard() {
+async function resolveBoard(charge = true) {
   let combo = 1;
   let matched = findMatches();
   while (matched.size > 0) {
-    await removeMatches(matched, combo);
+    await removeMatches(matched, combo, charge);
     await applyGravityAndRefill();
     combo++;
     matched = findMatches();
   }
   updateHUD(1);
-  if (!hasPossibleMove()) {
+  if (moves > 0 && !objectivesMet(level, score, collected, iceLeft()) && !hasPossibleMove()) {
+    notice('没有可用交换，已为你免费洗牌。');
     await sleep(300);
     await reshuffle();
   }
@@ -423,8 +481,9 @@ const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 
 function pickGem(ev) {
-  pointer.x = (ev.clientX / innerWidth) * 2 - 1;
-  pointer.y = -(ev.clientY / innerHeight) * 2 + 1;
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
   const hit = raycaster.intersectObjects(gemGroup.children, true)[0];
   if (!hit) return null;
@@ -445,6 +504,7 @@ function setSelected(g) {
 async function trySwap(ga, gb) {
   const a = { r: ga.userData.r, c: ga.userData.c }, b = { r: gb.userData.r, c: gb.userData.c };
   busy = true;
+  updateHUD(1);
   setSelected(null);
   swapCells(a, b);
   sfx.swap();
@@ -455,13 +515,16 @@ async function trySwap(ga, gb) {
     swapCells(a, b);
     await animateToCell(ga, gb);
     busy = false;
+    updateHUD(1);
+    notice('这次交换无法消除，不扣步数。');
     return;
   }
   moves--;
   updateHUD(1);
   await resolveBoard();
   busy = false;
-  if (moves <= 0) endGame();
+  checkOutcome();
+  updateHUD(1);
 }
 
 renderer.domElement.addEventListener('pointerdown', ev => {
@@ -469,6 +532,7 @@ renderer.domElement.addEventListener('pointerdown', ev => {
   if (busy || gameOver) return;
   const g = pickGem(ev);
   if (!g) { setSelected(null); return; }
+  if (activeSkill) { useSkill(g); return; }
   if (!selected) { setSelected(g); sfx.select(); return; }
   if (g === selected) { setSelected(null); return; }
   const dr = Math.abs(g.userData.r - selected.userData.r), dc = Math.abs(g.userData.c - selected.userData.c);
@@ -487,25 +551,104 @@ renderer.domElement.addEventListener('pointermove', ev => {
   renderer.domElement.style.cursor = g ? 'pointer' : 'default';
 });
 
-function endGame() {
+function refreshLevels() {
+  $('level-select').replaceChildren(...LEVELS.map((item, i) => {
+    const option = document.createElement('option');
+    option.value = i;
+    option.disabled = item.id > progress.unlocked;
+    option.textContent = `${item.id > progress.unlocked ? '🔒 ' : ''}${item.id}. ${item.name} ${'★'.repeat(progress.stars[i])}`;
+    return option;
+  }));
+  $('level-select').value = levelIndex;
+}
+function checkOutcome() {
+  const outcome = outcomeFor(level, score, collected, iceLeft(), moves);
+  if (outcome !== 'playing') endGame(outcome === 'won');
+}
+function endGame(success) {
   gameOver = true;
+  won = success;
+  activeSkill = null;
+  setSelected(null);
   sfx.gameOver();
+  const stars = starsFor(moves, level.moves);
+  let saved = true;
+  if (success) {
+    progress.stars[levelIndex] = Math.max(progress.stars[levelIndex], stars);
+    progress.unlocked = Math.min(LEVELS.length, Math.max(progress.unlocked, level.id + 1));
+    try { localStorage.setItem('happy-match3-progress', JSON.stringify(progress)); } catch { saved = false; }
+    refreshLevels();
+  }
+  $('result-title').textContent = success ? (level.id === 12 ? '恭喜完成全部关卡！' : '关卡通过！') : '还差一点点';
+  $('result-stars').textContent = success ? '★'.repeat(stars) + '☆'.repeat(3 - stars) : '再试一次';
+  $('result-detail').textContent = success
+    ? `全部目标完成，剩余 ${moves} 步。${saved ? '星级与解锁进度已保存。' : '浏览器无法保存进度，本次会话仍可继续。'}`
+    : `未完成：${[score < level.targetScore ? `分数还差 ${level.targetScore - score}` : '', collected < level.collect ? `${GEM_DEFS[level.collectType].name}还差 ${level.collect - collected} 只` : '', iceLeft() ? `还有 ${iceLeft()} 层冰` : ''].filter(Boolean).join('、')}`;
   $('final-score').textContent = score;
+  $('next-level').hidden = !success || level.id === LEVELS.length;
   $('overlay').classList.remove('hidden');
+  $('next-level').hidden ? $('play-again').focus() : $('next-level').focus();
 }
 
-async function restart() {
+async function restart(index = levelIndex) {
   if (busy) return;
   busy = true;
+  levelIndex = index;
+  level = LEVELS[levelIndex];
   $('overlay').classList.add('hidden');
   gameOver = false;
-  score = 0; moves = START_MOVES;
+  won = false;
+  score = 0; moves = level.moves; energy = 12; collected = 0; activeSkill = null;
   setSelected(null);
+  setupIce();
+  refreshLevels();
   updateHUD(1);
+  notice(`完成全部目标即可过关。${level.iceLayers === 2 ? '深蓝冰块需要消除两次。' : '消除冰块上的动物可以破冰。'}`);
   await initBoard();
   busy = false;
+  updateHUD(1);
 }
+
+async function useSkill(g) {
+  const kind = activeSkill;
+  if (busy || gameOver || !kind || energy < SKILLS[kind].cost) return;
+  busy = true;
+  activeSkill = null;
+  setSelected(null);
+  energy -= SKILLS[kind].cost;
+  updateHUD(1);
+  notice(`${SKILLS[kind].name}已释放，不消耗步数。`);
+  if (kind === 'shuffle') await reshuffle();
+  else {
+    const cells = skillCells(kind, g.userData.r, g.userData.c, grid.map(row => row.map(gem => gem.userData.type)));
+    await removeMatches(cells, 1, false, kind === 'hammer');
+    await applyGravityAndRefill();
+    await resolveBoard(false);
+  }
+  busy = false;
+  checkOutcome();
+  updateHUD(1);
+}
+for (const [kind, skill] of Object.entries(SKILLS)) {
+  $(`skill-${kind}`).addEventListener('click', () => {
+    unlock();
+    if (busy || gameOver || energy < skill.cost) return;
+    activeSkill = activeSkill === kind ? null : kind;
+    setSelected(null);
+    if (activeSkill === 'shuffle') { useSkill(null); return; }
+    notice(activeSkill ? `${skill.description}；再次点击技能或按 Esc 取消。` : '技能已取消，可以继续交换动物。');
+    updateHUD(1);
+  });
+}
+addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') { activeSkill = null; setSelected(null); updateHUD(1); notice('已取消选择。'); }
+});
 $('restart').addEventListener('click', () => { unlock(); restart(); });
+$('next-level').addEventListener('click', () => { if (won && levelIndex < 11) restart(levelIndex + 1); });
+$('level-select').addEventListener('change', ev => {
+  const index = Number(ev.target.value);
+  if (Number.isInteger(index) && index >= 0 && index < progress.unlocked) restart(index);
+});
 $('mute').addEventListener('click', () => {
   unlock();
   setMuted(!isMuted());
@@ -538,11 +681,21 @@ function animate() {
   renderer.render(scene, camera);
 }
 
-addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
+function resizeGame() {
+  const mobile = innerWidth <= 760;
+  const left = mobile ? 0 : 320;
+  const top = mobile ? 245 : 0;
+  const width = Math.max(1, innerWidth - left);
+  const height = Math.max(1, innerHeight - top - (mobile ? 164 : 110));
+  renderer.domElement.style.left = `${left}px`;
+  renderer.domElement.style.top = `${top}px`;
+  renderer.setSize(width, height);
+  camera.aspect = width / height;
+  camera.position.z = Math.max(14.8, 6.5 / Math.tan(Math.PI / 8) / camera.aspect);
   camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
-});
+}
+addEventListener('resize', resizeGame);
+resizeGame();
 
 restart();
 animate();
@@ -550,6 +703,7 @@ animate();
 // 调试钩子（用于自动化测试）
 window.__match3 = {
   grid, camera, colX, rowY, ROWS, COLS,
+  get level() { return level; }, get energy() { return energy; }, get ice() { return [...ice]; }, get collected() { return collected; }, get gameOver() { return gameOver; }, get won() { return won; },
   get busy() { return busy; }, get score() { return score; }, get moves() { return moves; },
   types: () => grid.map(row => row.map(g => g ? g.userData.type : null)),
   // 检查每个宝石的视觉位置是否与逻辑格子一致
@@ -565,6 +719,7 @@ window.__match3 = {
   },
   clickCell: (r, c) => {
     const v = new THREE.Vector3(colX(c), rowY(r), 0.2).project(camera);
-    renderer.domElement.dispatchEvent(new PointerEvent('pointerdown', { clientX: (v.x + 1) / 2 * innerWidth, clientY: (1 - v.y) / 2 * innerHeight, bubbles: true }));
+    const rect = renderer.domElement.getBoundingClientRect();
+    renderer.domElement.dispatchEvent(new PointerEvent('pointerdown', { clientX: rect.left + (v.x + 1) / 2 * rect.width, clientY: rect.top + (1 - v.y) / 2 * rect.height, bubbles: true }));
   },
 };
