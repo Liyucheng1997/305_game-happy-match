@@ -2,49 +2,97 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>开心消消乐 v1.1 · 森林冒险</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#8fd3f5" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27><text y=%27.9em%27 font-size=%2790%27>🦊</text></svg>" />
+  <title>开心消消乐 v1.2 · 森林大冒险</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&display=swap" />
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
-  <aside id="hud">
-    <div class="panel">
-      <div class="eyebrow">FOREST ADVENTURE · 森林冒险</div>
-      <div class="title">开心消消乐<span>v1.1 闯关版</span></div>
-      <label for="level-select" class="hint">冒险地图 · 通关后解锁下一关</label>
-      <select id="level-select" aria-label="选择关卡"></select>
-      <h2 id="level-title"></h2>
-      <div class="stats"><div>剩余步数<b id="moves">26</b></div><div>连锁倍率<b id="combo">-</b></div></div>
-      <div class="goal-heading">本关目标 <span>全部完成即可过关</span></div>
-      <div class="row score-row"><span>✦ 分数</span><span><b id="score">0</b> / <span id="score-target">650</span></span></div>
-      <progress id="score-progress" value="0" max="650" aria-label="分数目标进度"></progress>
-      <div class="row"><span>♡ 动物收集</span><b id="collect-goal"></b></div>
-      <div class="row"><span>❄ 破冰目标</span><b id="ice-goal"></b></div>
-      <div class="actions"><button id="restart">重玩本关</button><button id="mute" class="secondary">🔊 声音开</button></div>
-      <details class="instructions"><summary>玩法与技能说明</summary><p>点击相邻动物交换，横竖三个同类即可消除；无效交换不扣步数。每消除一个动物获得 1 能量，上限 60。</p><p>技能不扣步数，技能及其连锁不产生能量。冰层固定在格子上，消除上面的动物会削掉一层；破冰锤可击碎两层冰。无可用交换时自动免费洗牌。</p><p>步数用完即结算；剩余步数达到初始的 35% / 15% 可获三星 / 二星，否则为一星。少用步数，挑战满星！</p></details>
+  <div id="stage"></div>
+
+  <header id="topbar" aria-label="关卡信息">
+    <div class="tb-level"><small id="level-num">第 1 关</small><strong id="level-name">林间起步</strong></div>
+    <div class="tb-moves" aria-label="剩余步数"><b id="moves">20</b><small>步数</small></div>
+    <div class="tb-goals" id="goals" aria-label="关卡目标"></div>
+    <div class="tb-score">
+      <div class="score-row"><small>得分</small><b id="score">0</b></div>
+      <div class="starbar" aria-hidden="true"><div class="fill" id="score-fill"></div><i id="star-2">★</i><i id="star-3">★</i></div>
     </div>
-  </aside>
-  <section id="skillbar" aria-label="技能栏">
-    <div class="energy-row"><span>⚡ 魔法能量 <b id="energy">12 / 60</b></span><progress id="energy-progress" value="12" max="60" aria-label="魔法能量"></progress></div>
+    <nav class="tb-actions">
+      <button id="btn-map" class="icon-btn" title="关卡地图" aria-label="关卡地图">🗺️</button>
+      <button id="btn-restart" class="icon-btn" title="重玩本关" aria-label="重玩本关">↻</button>
+      <button id="btn-sound" class="icon-btn" title="声音开关" aria-label="声音开关">🔊</button>
+    </nav>
+  </header>
+
+  <footer id="skillbar" aria-label="魔法道具">
+    <div class="energy">
+      <span>⚡ 魔法能量</span>
+      <div class="energy-track"><div id="energy-fill"></div></div>
+      <b id="energy">12</b>
+    </div>
     <div class="skills">
-      <button id="skill-hammer" title="清除一格并击碎全部冰层"><span>🔨</span>破冰锤<small>12 能量</small></button>
-      <button id="skill-bomb" title="消除周围 3×3 区域"><span>💥</span>范围炸弹<small>28 能量</small></button>
-      <button id="skill-rainbow" title="消除全盘同类动物"><span>🌈</span>彩虹魔法<small>45 能量</small></button>
-      <button id="skill-shuffle" title="重新生成可消除的棋盘，保留冰层"><span>🔀</span>重新洗牌<small>20 能量</small></button>
+      <button id="skill-hammer" data-skill="hammer"><span class="ico">🔨</span><span class="name">小木槌</span><small>12</small></button>
+      <button id="skill-bomb" data-skill="bomb"><span class="ico">💥</span><span class="name">蒲公英炸弹</span><small>28</small></button>
+      <button id="skill-rainbow" data-skill="rainbow"><span class="ico">🌈</span><span class="name">彩虹魔法</span><small>45</small></button>
+      <button id="skill-shuffle" data-skill="shuffle"><span class="ico">🔀</span><span class="name">洗牌</span><small>20</small></button>
     </div>
     <p id="status" role="status" aria-live="polite"></p>
-  </section>
-  <div id="overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="result-title">
-    <div class="card">
-      <div class="eyebrow">FOREST ADVENTURE</div>
-      <h1 id="result-title">关卡通过！</h1>
-      <div id="result-stars"></div>
-      <p id="result-detail"></p>
-      <p>本关得分：<b id="final-score">0</b></p>
-      <button id="next-level">进入下一关 →</button>
-      <button id="play-again" class="secondary">重玩本关</button>
+  </footer>
+
+  <div id="fx-layer" aria-hidden="true"></div>
+
+  <div id="banner" class="hidden" role="dialog" aria-labelledby="banner-title">
+    <div class="banner-card">
+      <small id="banner-num">第 1 关</small>
+      <h2 id="banner-title">林间起步</h2>
+      <div id="banner-goals" class="banner-goals"></div>
+      <p id="banner-tip"></p>
+      <span class="banner-hint">点击任意处开始</span>
     </div>
   </div>
+
+  <section id="map" class="screen" aria-label="关卡地图">
+    <div class="map-card">
+      <h1 class="logo">开心消消乐<span>森林大冒险 v1.2</span></h1>
+      <div id="parade" class="parade" aria-hidden="true"></div>
+      <p class="map-sub">已收集 <b id="total-stars">0</b> / <span id="max-stars">45</span> 颗星星</p>
+      <ol id="map-path"></ol>
+      <div class="map-actions">
+        <button id="map-play" class="primary big">开始冒险</button>
+        <button id="map-close" class="ghost">返回游戏</button>
+      </div>
+      <details class="howto">
+        <summary>怎么玩？</summary>
+        <ul>
+          <li>拖动或点击相邻的两只动物交换位置，横竖连成 3 个即可消除。</li>
+          <li>连成 4 个 → <b>疾风动物</b>，清除整行或整列；L / T 形 → <b>炸弹动物</b>，炸开周围；连成 5 个 → <b>彩虹球</b>，与任意动物交换可消除全部同类。</li>
+          <li>把两个特效交换可以触发更强的<b>组合技</b>。</li>
+          <li>冰层、木箱、藤蔓、橡果等关卡目标会逐步登场。完成全部目标即可过关，剩余步数会变成额外奖励。</li>
+          <li>消除动物可积攒魔法能量，用来释放道具；道具不消耗步数。</li>
+        </ul>
+      </details>
+    </div>
+  </section>
+
+  <section id="result" class="screen hidden" role="dialog" aria-modal="true" aria-labelledby="result-title">
+    <div class="result-card">
+      <div class="result-stars" id="result-stars"><i>★</i><i>★</i><i>★</i></div>
+      <h1 id="result-title">过关啦！</h1>
+      <p id="result-detail"></p>
+      <div class="result-score"><small>本关得分</small><b id="result-score">0</b><small id="result-best"></small></div>
+      <div class="result-actions">
+        <button id="result-next" class="primary big">下一关 →</button>
+        <button id="result-retry" class="secondary">再玩一次</button>
+        <button id="result-map" class="ghost">关卡地图</button>
+      </div>
+    </div>
+  </section>
+
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>

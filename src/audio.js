@@ -8,7 +8,7 @@ function ensure() {
   if (ctx) return ctx;
   ctx = new (window.AudioContext || window.webkitAudioContext)();
   master = ctx.createGain(); master.gain.value = muted ? 0 : 1; master.connect(ctx.destination);
-  musicGain = ctx.createGain(); musicGain.gain.value = 0.18; musicGain.connect(master);
+  musicGain = ctx.createGain(); musicGain.gain.value = 0.14; musicGain.connect(master);
   sfxGain = ctx.createGain(); sfxGain.gain.value = 0.5; sfxGain.connect(master);
   return ctx;
 }
@@ -76,11 +76,29 @@ export const sfx = {
     if (combo >= 2) tone({ freq: base * 2, type: 'sine', t: n * 0.04, dur: 0.4, vol: 0.15 });
   },
   land() { if (!ctx) return; noise({ dur: 0.06, vol: 0.06, freq: 400 }); },
-  gameOver() {
+  lose() {
     if (!ctx) return;
     const notes = [659.25, 587.33, 523.25, 392];
     notes.forEach((f, i) => tone({ freq: f, type: 'triangle', t: i * 0.25, dur: 0.5, vol: 0.25 }));
   },
+  win() {
+    if (!ctx) return;
+    [523.25, 659.25, 783.99, 1046.5, 783.99, 1046.5, 1318.5].forEach((f, i) =>
+      tone({ freq: f, type: 'triangle', t: i * 0.11, dur: i === 6 ? 0.9 : 0.25, vol: 0.24 }));
+    [261.63, 329.63, 392].forEach(f => tone({ freq: f, type: 'sine', t: 0.66, dur: 1.2, vol: 0.12 }));
+  },
+  star(n = 0) { if (!ctx) return; tone({ freq: 880 * Math.pow(2, n * 4 / 12), type: 'triangle', dur: 0.35, vol: 0.25 }); tone({ freq: 1760 * Math.pow(2, n * 4 / 12), type: 'sine', t: 0.05, dur: 0.3, vol: 0.1 }); },
+  /** 生成特效动物：上行琶音 */
+  create() { if (!ctx) return; [0, 4, 7, 12].forEach((n, i) => tone({ freq: 659.25 * Math.pow(2, n / 12), type: 'sine', t: i * 0.045, dur: 0.22, vol: 0.18 })); },
+  line() { if (!ctx) return; tone({ freq: 1800, slide: 300, type: 'sawtooth', dur: 0.35, vol: 0.08 }); noise({ dur: 0.35, vol: 0.18, freq: 2500 }); },
+  bomb() { if (!ctx) return; tone({ freq: 160, slide: 40, type: 'sine', dur: 0.5, vol: 0.5 }); noise({ dur: 0.45, vol: 0.4, freq: 500 }); },
+  rainbow() { if (!ctx) return; for (let i = 0; i < 12; i++) tone({ freq: 523.25 * Math.pow(2, i / 7), type: 'sine', t: i * 0.035, dur: 0.25, vol: 0.12 }); },
+  crate() { if (!ctx) return; noise({ dur: 0.18, vol: 0.35, freq: 700 }); tone({ freq: 140, slide: 90, type: 'triangle', dur: 0.15, vol: 0.25 }); },
+  ice() { if (!ctx) return; noise({ dur: 0.12, vol: 0.2, freq: 5000 }); tone({ freq: 2400, slide: 1800, type: 'sine', dur: 0.12, vol: 0.08 }); },
+  vine() { if (!ctx) return; noise({ dur: 0.1, vol: 0.2, freq: 1800 }); tone({ freq: 300, slide: 500, type: 'triangle', dur: 0.1, vol: 0.12 }); },
+  acorn() { if (!ctx) return; [0, 7, 12, 16].forEach((n, i) => tone({ freq: 523.25 * Math.pow(2, n / 12), type: 'triangle', t: i * 0.07, dur: 0.25, vol: 0.2 })); },
+  convert(i = 0) { if (!ctx) return; tone({ freq: 880 * Math.pow(2, (i % 12) / 12), type: 'triangle', dur: 0.12, vol: 0.14 }); },
+  hammer() { if (!ctx) return; tone({ freq: 220, slide: 90, type: 'square', dur: 0.12, vol: 0.18 }); noise({ dur: 0.15, vol: 0.3, freq: 900 }); },
   shuffle() { if (!ctx) return; for (let i = 0; i < 8; i++) tone({ freq: 400 + i * 120, type: 'sine', t: i * 0.05, dur: 0.12, vol: 0.12 }); },
 };
 
@@ -104,7 +122,7 @@ function scheduleBar(startTime, bar) {
   for (let i = 0; i < 16; i++) {
     const n = MELODY[(bar * 16 + i) % MELODY.length];
     const t = startTime + i * step;
-    if (n !== null) tone({ freq: st(C5, n), type: 'square', t: t - ctx.currentTime, dur: step * 0.9, vol: 0.12, dest: musicGain, attack: 0.01 });
+    if (n !== null) tone({ freq: st(C5, n), type: 'triangle', t: t - ctx.currentTime, dur: step * 0.9, vol: 0.16, dest: musicGain, attack: 0.01 });
     // 低音每拍一次
     if (i % 2 === 0) {
       const b = BASS[(bar * 8 + i / 2) % BASS.length];

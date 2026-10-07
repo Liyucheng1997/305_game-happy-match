@@ -1,213 +1,281 @@
 import * as THREE from 'three';
-import { LEVELS, SKILLS, skillCells, objectivesMet, starsFor, readProgress, outcomeFor } from './rules.js';
+import { LEVELS, ANIMALS, SKILLS, starsFor, readProgress } from './levels.js';
+import { Game } from './engine.js';
+import { createLibrary, makeDeco, makeIce, makeCrate, makeVine, renderIcons, CELL, PIECE_Z } from './models.js';
+import { createWorld, buildBoard, cellPosition } from './world.js';
+import { FX } from './fx.js';
+import { createUI, goalLabel } from './ui.js';
 import { unlock, sfx, setMuted, isMuted } from './audio.js';
 
-// ---------- 配置 ----------
-const ROWS = 8;
-const COLS = 8;
+const SAVE_KEY = 'happy-match3-v2';
+const TICK = 0.07;           // 下落时每格耗时
+const HINT_DELAY = 6;        // 闲置多少秒后提示
 
-const CELL = 1.15;          // 格子间距
-
-
-const GEM_DEFS = [
-  { name: '猫', color: 0xffa23c },
-  { name: '狗', color: 0xb37a4c },
-  { name: '猪', color: 0xffa6c9 },
-  { name: '熊', color: 0x7a4b2a },
-  { name: '蛙', color: 0x5dd35d },
-  { name: '兔', color: 0xf4f4f8 },
-];
-
-// ---------- 场景 ----------
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0f0c29);
-scene.fog = new THREE.Fog(0x0f0c29, 14, 26);
-
-const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
-camera.position.set(0, 2.5, 13.5);
-camera.lookAt(0, 0, 0);
-
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+// ---------- 渲染器与场景 ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-document.body.appendChild(renderer.domElement);
+renderer.toneMappingExposure = 1.05;
+document.getElementById('stage').append(renderer.domElement);
+const canvas = renderer.domElement;
 
-scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-const key = new THREE.DirectionalLight(0xffffff, 2.2);
-key.position.set(5, 8, 8);
-key.castShadow = true;
-key.shadow.mapSize.set(2048, 2048);
-key.shadow.camera.left = -8; key.shadow.camera.right = 8;
-key.shadow.camera.top = 8; key.shadow.camera.bottom = -8;
-scene.add(key);
-const rim = new THREE.PointLight(0x8a6bff, 30, 30);
-rim.position.set(-6, -3, 5);
-scene.add(rim);
+const world = createWorld(renderer);
+const { scene } = world;
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 200);
+const camBase = new THREE.Vector3(0, 0, 20);
+const lib = createLibrary();
 
-// 棋盘背板
-const boardW = COLS * CELL + 0.6;
-const boardH = ROWS * CELL + 0.6;
-const board = new THREE.Mesh(
-  new THREE.BoxGeometry(boardW, boardH, 0.4),
-  new THREE.MeshStandardMaterial({ color: 0x1d1a4a, roughness: 0.8, metalness: 0.1 })
-);
-board.position.z = -0.5;
-board.receiveShadow = true;
+const board = new THREE.Group();
 scene.add(board);
+let boardBase = null;
+const fx = new FX(scene, board);
+fx.setRoot(board);
 
-// 格子底纹
-const cellGeo = new THREE.PlaneGeometry(CELL * 0.92, CELL * 0.92);
-const cellMat = new THREE.MeshStandardMaterial({ color: 0x2a2666, roughness: 0.9 });
-for (let r = 0; r < ROWS; r++) {
-  for (let c = 0; c < COLS; c++) {
-    const m = new THREE.Mesh(cellGeo, cellMat);
-    m.position.set(colX(c), rowY(r), -0.29);
-    m.receiveShadow = true;
-    scene.add(m);
-  }
+// 选中框与技能范围框
+function frameTexture(stroke, fill) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = fill; ctx.strokeStyle = stroke; ctx.lineWidth = 9;
+  ctx.beginPath(); ctx.roundRect(8, 8, 112, 112, 24); ctx.fill(); ctx.stroke();
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
 }
+const selFrame = new THREE.Mesh(new THREE.PlaneGeometry(0.98, 0.98), new THREE.MeshBasicMaterial({ map: frameTexture('#ffb31f', 'rgba(255,225,120,0.45)'), transparent: true, depthWrite: false }));
+selFrame.visible = false;
+board.add(selFrame);
+const previewMat = new THREE.MeshBasicMaterial({ map: frameTexture('#c45cff', 'rgba(210,140,255,0.4)'), transparent: true, depthWrite: false });
+const previewFrames = [];
 
-// 选中框
-const selector = new THREE.Mesh(
-  new THREE.RingGeometry(0.56, 0.64, 48),
-  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, side: THREE.DoubleSide })
-);
-selector.visible = false;
-selector.position.z = 0.55;
-scene.add(selector);
+// ---------- 状态 ----------
+const views = new Map();        // 棋子 id → 模型
+const cellViews = new Map();    // 格子 → { ice, crate, vine }
+let game = null, levelIndex = 0, busy = false, selected = null, activeSkill = null, drag = null, hint = null;
+let display = { moves: 0, score: 0, goals: [], energy: 0 };
+let clockTime = 0, lastAction = 0, timeScale = 1, shake = 0, levelToken = 0;
+const lookTarget = new THREE.Vector3();
+let lookUntil = 0;
+let progress = loadProgress();
 
-// ---------- 工具 ----------
-function colX(c) { return (c - (COLS - 1) / 2) * CELL; }
-function rowY(r) { return ((ROWS - 1) / 2 - r) * CELL; } // r=0 在最上面
+function loadProgress() { try { return readProgress(localStorage.getItem(SAVE_KEY)); } catch { return readProgress(null); } }
+function saveProgress() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(progress)); return true; } catch { return false; } }
 
-// ---------- 动物头建模 ----------
-const mat = (color, opts = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.05, ...opts });
-const M = {
-  black: mat(0x222222, { roughness: 0.3 }),
-  white: mat(0xffffff),
-  pink: mat(0xff7fa8),
-  darkPink: mat(0xe0558a),
-  cream: mat(0xf7e2c4),
-  eyeShine: new THREE.MeshBasicMaterial({ color: 0xffffff }),
-};
-const G = {
-  sphere: new THREE.SphereGeometry(1, 32, 24),
-  cone: new THREE.ConeGeometry(1, 1, 24),
-  cyl: new THREE.CylinderGeometry(1, 1, 1, 24),
-  box: new THREE.BoxGeometry(1, 1, 1),
-};
-function part(geo, material, x, y, z, sx = 1, sy = sx, sz = sx, rx = 0, ry = 0, rz = 0) {
-  const m = new THREE.Mesh(geo, material);
-  m.position.set(x, y, z);
-  m.scale.set(sx, sy, sz);
-  m.rotation.set(rx, ry, rz);
-  m.castShadow = true;
-  return m;
-}
-// 眼睛：黑眼珠 + 高光
-function eyes(group, x, y, z, r = 0.07) {
-  for (const sx of [-1, 1]) {
-    group.add(part(G.sphere, M.black, sx * x, y, z, r));
-    group.add(part(G.sphere, M.eyeShine, sx * x + r * 0.35, y + r * 0.35, z + r * 0.8, r * 0.3));
-  }
-}
-const HEAD_R = 0.4;
-const builders = [
-  // 猫：尖耳、粉鼻、胡须
-  (color) => {
-    const g = new THREE.Group(), fur = mat(color);
-    g.add(part(G.sphere, fur, 0, 0, 0, HEAD_R, HEAD_R * 0.92, HEAD_R * 0.85));
-    for (const sx of [-1, 1]) {
-      g.add(part(G.cone, fur, sx * 0.26, 0.36, 0, 0.14, 0.26, 0.1, 0, 0, -sx * 0.35));
-      g.add(part(G.cone, M.pink, sx * 0.26, 0.34, 0.05, 0.07, 0.14, 0.05, 0, 0, -sx * 0.35));
-    }
-    eyes(g, 0.15, 0.06, 0.33);
-    g.add(part(G.sphere, M.pink, 0, -0.07, 0.37, 0.05, 0.04, 0.04));
-    for (const sx of [-1, 1]) for (const dy of [-0.03, 0.03])
-      g.add(part(G.box, M.white, sx * 0.3, -0.1 + dy, 0.3, 0.28, 0.012, 0.012, 0, 0, dy * 4 * sx));
-    return g;
-  },
-  // 狗：垂耳、浅色口鼻、黑鼻子
-  (color) => {
-    const g = new THREE.Group(), fur = mat(color);
-    g.add(part(G.sphere, fur, 0, 0, 0, HEAD_R, HEAD_R * 0.95, HEAD_R * 0.85));
-    for (const sx of [-1, 1])
-      g.add(part(G.sphere, mat(0x6b4326), sx * 0.38, 0.05, -0.02, 0.11, 0.26, 0.09));
-    g.add(part(G.sphere, M.cream, 0, -0.14, 0.3, 0.19, 0.15, 0.16));
-    g.add(part(G.sphere, M.black, 0, -0.08, 0.44, 0.07, 0.055, 0.06));
-    eyes(g, 0.15, 0.1, 0.32);
-    g.add(part(G.sphere, M.pink, 0, -0.26, 0.34, 0.06, 0.035, 0.04));
-    return g;
-  },
-  // 猪：大鼻子、小耳朵
-  (color) => {
-    const g = new THREE.Group(), skin = mat(color);
-    g.add(part(G.sphere, skin, 0, 0, 0, HEAD_R, HEAD_R * 0.9, HEAD_R * 0.85));
-    g.add(part(G.cyl, M.darkPink, 0, -0.06, 0.36, 0.15, 0.1, 0.15, Math.PI / 2));
-    for (const sx of [-1, 1]) g.add(part(G.sphere, mat(0x9c2c5c), sx * 0.06, -0.06, 0.42, 0.03, 0.04, 0.02));
-    for (const sx of [-1, 1])
-      g.add(part(G.cone, skin, sx * 0.27, 0.33, 0, 0.12, 0.18, 0.08, -0.3, 0, -sx * 0.6));
-    eyes(g, 0.16, 0.12, 0.32, 0.06);
-    return g;
-  },
-  // 熊：圆耳、浅色口鼻
-  (color) => {
-    const g = new THREE.Group(), fur = mat(color);
-    g.add(part(G.sphere, fur, 0, 0, 0, HEAD_R, HEAD_R * 0.95, HEAD_R * 0.9));
-    for (const sx of [-1, 1]) {
-      g.add(part(G.sphere, fur, sx * 0.3, 0.3, -0.05, 0.13));
-      g.add(part(G.sphere, M.cream, sx * 0.3, 0.3, 0.03, 0.07));
-    }
-    g.add(part(G.sphere, M.cream, 0, -0.12, 0.32, 0.17, 0.13, 0.14));
-    g.add(part(G.sphere, M.black, 0, -0.07, 0.44, 0.07, 0.05, 0.05));
-    eyes(g, 0.14, 0.1, 0.34, 0.06);
-    return g;
-  },
-  // 青蛙：扁头、顶部大眼、腮红
-  (color) => {
-    const g = new THREE.Group(), skin = mat(color);
-    g.add(part(G.sphere, skin, 0, -0.05, 0, HEAD_R * 1.05, HEAD_R * 0.75, HEAD_R * 0.85));
-    for (const sx of [-1, 1]) {
-      g.add(part(G.sphere, skin, sx * 0.22, 0.22, 0.12, 0.15));
-      g.add(part(G.sphere, M.white, sx * 0.22, 0.22, 0.2, 0.1));
-      g.add(part(G.sphere, M.black, sx * 0.22, 0.22, 0.27, 0.05));
-      g.add(part(G.sphere, M.pink, sx * 0.25, -0.1, 0.3, 0.07, 0.04, 0.03));
-    }
-    g.add(part(G.box, mat(0x2e7d32), 0, -0.16, 0.36, 0.3, 0.02, 0.02));
-    return g;
-  },
-  // 兔子：长耳、粉鼻、门牙
-  (color) => {
-    const g = new THREE.Group(), fur = mat(color);
-    g.add(part(G.sphere, fur, 0, -0.05, 0, HEAD_R * 0.9, HEAD_R * 0.85, HEAD_R * 0.8));
-    for (const sx of [-1, 1]) {
-      g.add(part(G.sphere, fur, sx * 0.14, 0.48, -0.02, 0.09, 0.3, 0.07, 0, 0, -sx * 0.15));
-      g.add(part(G.sphere, M.pink, sx * 0.14, 0.48, 0.03, 0.05, 0.22, 0.04, 0, 0, -sx * 0.15));
-    }
-    eyes(g, 0.14, 0.03, 0.3, 0.06);
-    g.add(part(G.sphere, M.pink, 0, -0.1, 0.32, 0.045, 0.035, 0.035));
-    g.add(part(G.box, M.white, 0, -0.2, 0.3, 0.08, 0.07, 0.03));
-    g.add(part(G.box, M.black, 0, -0.2, 0.318, 0.006, 0.07, 0.01));
-    return g;
-  },
-];
-const prototypes = GEM_DEFS.map((d, i) => builders[i](d.color));
-
-
-// ---------- 补间动画 ----------
-const tweens = [];
-function tween(obj, to, duration, { ease = easeOutCubic, onDone } = {}) {
-  const from = {};
-  for (const k in to) from[k] = obj[k];
+// ---------- 补间动画（按游戏时间推进，切到后台时自动暂停） ----------
+const anims = new Set();
+function animate(duration, fn, ease = t => t) {
   return new Promise(resolve => {
-    tweens.push({ obj, from, to, duration, t: 0, ease, done: () => { onDone && onDone(); resolve(); } });
+    if (duration <= 0) { fn(1, 1); resolve(); return; }
+    anims.add({ t: 0, duration, fn, ease, resolve });
   });
 }
-function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
-function easeOutBack(t) { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); }
+const wait = s => animate(s, () => {});
+const easeInOut = t => (t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2);
+const easeOutBack = t => 1 + 2.70158 * (t - 1) ** 3 + 1.70158 * (t - 1) ** 2;
+const easeInCubic = t => t * t * t;
+function tickAnims(dt) {
+  for (const a of [...anims]) {
+    a.t += dt;
+    const k = Math.min(1, a.t / a.duration);
+    a.fn(a.ease(k), k);
+    if (k >= 1) { anims.delete(a); a.resolve(); }
+  }
+}
+
+// ---------- 坐标 ----------
+const posOf = (r, c) => cellPosition(game, r, c).setZ(PIECE_Z);
+const posOfI = i => posOf(Math.floor(i / game.cols), i % game.cols);
+const colorOf = v => (v.userData.kind === 'animal' ? ANIMALS[v.userData.type].color : v.userData.kind === 'acorn' ? '#c9803f' : '#d08cff');
+function toScreen(p) {
+  const v = p.clone().project(camera);
+  return { x: (v.x + 1) / 2 * innerWidth, y: (1 - v.y) / 2 * innerHeight };
+}
+
+// ---------- 棋子模型 ----------
+const decoCache = new Map();
+function setSpecial(v, special) {
+  const u = v.userData;
+  if (u.deco) v.remove(u.deco);
+  u.special = special;
+  u.deco = null;
+  if (!special) return;
+  const key = special;
+  if (!decoCache.has(key)) decoCache.set(key, makeDeco(special));
+  u.deco = decoCache.get(key).clone();
+  v.add(u.deco);
+}
+function makeView(p) {
+  const proto = p.kind === 'acorn' ? lib.acorn : p.kind === 'rainbow' ? lib.rainbow : lib.animals[p.type];
+  const v = proto.clone();
+  v.userData = {
+    id: p.id, kind: p.kind, type: p.type, special: null, deco: null,
+    body: v.getObjectByName('body'), eyes: v.getObjectByName('eyes'), gem: v.getObjectByName('gem'), orbit: v.getObjectByName('orbit'),
+    blink: clockTime + 1 + Math.random() * 4, phase: Math.random() * Math.PI * 2,
+  };
+  setSpecial(v, p.special);
+  board.add(v);
+  views.set(p.id, v);
+  return v;
+}
+function dropView(v) { board.remove(v); views.delete(v.userData.id); }
+
+const protoCache = {};
+function obstacleProto(kind, layers) {
+  const key = `${kind}${layers}`;
+  protoCache[key] ??= kind === 'ice' ? makeIce(layers) : kind === 'crate' ? makeCrate(layers) : makeVine();
+  return protoCache[key].clone();
+}
+function setObstacle(i, kind, layers) {
+  const entry = cellViews.get(i) ?? {};
+  cellViews.set(i, entry);
+  if (entry[kind]) board.remove(entry[kind]);
+  entry[kind] = null;
+  if (!layers) return;
+  const obj = obstacleProto(kind, layers);
+  const p = posOfI(i);
+  obj.position.x = p.x;
+  obj.position.y = p.y;
+  obj.position.z = kind === 'vine' ? PIECE_Z : kind === 'crate' ? obj.position.z - 0.015 : -0.015;
+  board.add(obj);
+  entry[kind] = obj;
+}
+
+// ---------- 镜头适配：棋盘放在顶栏与道具栏之间 ----------
+function fitCamera() {
+  if (!game) return;
+  const top = document.getElementById('topbar').getBoundingClientRect().bottom + 6;
+  const bottom = document.getElementById('skillbar').getBoundingClientRect().top - 6;
+  const W = innerWidth, H = innerHeight;
+  const regionH = Math.max(120, bottom - top), regionW = Math.max(120, W - 16);
+  const hasExits = game.goals.some(g => g.kind === 'acorn');
+  const bw = game.cols * CELL + 0.7, bh = game.rows * CELL + 0.7 + (hasExits ? 0.5 : 0);
+  const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const D = Math.max(bh * H / (2 * tanHalf * regionH), bw * H / (2 * tanHalf * regionW));
+  const wpp = (2 * D * tanHalf) / H;
+  const dyPix = H / 2 - (top + bottom) / 2;
+  const offsetY = hasExits ? -0.25 : 0;
+  camBase.set(0, -dyPix * wpp + offsetY, D + 0.3);
+  camera.aspect = W / H;
+  camera.updateProjectionMatrix();
+  fx.setScale(renderer.getDrawingBufferSize(new THREE.Vector2()).y / (2 * tanHalf));
+}
+function onResize() {
+  renderer.setSize(innerWidth, innerHeight);
+  fitCamera();
+}
+addEventListener('resize', onResize);
+
+// ---------- HUD ----------
+const ui = createUI({
+  onPlay(i) {
+    unlock();
+    const index = i ?? Number(document.getElementById('map-play').dataset.level);
+    if (index + 1 <= progress.unlocked) startLevel(index);
+  },
+  onMap() {
+    unlock();
+    if (busy && !ui.resultOpen()) return;
+    ui.showMap(progress, levelIndex, !!game && game.status === 'playing' && !ui.resultOpen());
+  },
+  onCloseMap() { ui.hideMap(); },
+  onRestart() { unlock(); if (!busy || ui.resultOpen()) startLevel(levelIndex); },
+  onNext() { unlock(); if (levelIndex + 1 < LEVELS.length) startLevel(levelIndex + 1); },
+  onSound() {
+    unlock();
+    setMuted(!isMuted());
+    ui.setSound(!isMuted());
+    try { localStorage.setItem('happy-match3-muted', isMuted() ? '1' : '0'); } catch { /* 忽略 */ }
+  },
+  onSkill(kind) {
+    unlock();
+    if (!game || busy || game.status !== 'playing' || game.energy < SKILLS[kind].cost) return;
+    lastAction = clockTime;
+    clearHint();
+    if (kind === 'shuffle') { castSkill('shuffle', null); return; }
+    activeSkill = activeSkill === kind ? null : kind;
+    select(null);
+    showPreview([]);
+    ui.status(activeSkill ? `${SKILLS[kind].description}。再次点击按钮或按 Esc 取消。` : '已取消道具。');
+    refreshHUD();
+  },
+});
+ui.setIcons(renderIcons(lib, world.envMap));
+try { if (localStorage.getItem('happy-match3-muted') === '1') { setMuted(true); ui.setSound(false); } } catch { /* 忽略 */ }
+
+function syncDisplay() {
+  display = { moves: game.moves, score: game.score, goals: game.goals.map(g => ({ ...g })), energy: game.energy };
+}
+function refreshHUD() {
+  if (!game) return;
+  ui.update({ ...display, busy, playing: game.status === 'playing', activeSkill });
+}
+function bumpGoal(kind, type, n) {
+  let changed = false;
+  for (const g of display.goals) if (g.kind === kind && (kind !== 'collect' || g.type === type)) { g.current += n; changed = true; }
+  if (changed) refreshHUD();
+}
+
+// ---------- 关卡流程 ----------
+async function startLevel(index, { banner = true } = {}) {
+  ui.hideMap();
+  ui.hideResult();
+  ui.hideBanner();
+  const token = ++levelToken;
+  levelIndex = index;
+  const level = LEVELS[index];
+  game = new Game(level);
+  activeSkill = null;
+  select(null);
+  showPreview([]);
+  clearHint();
+  drag = null;
+  for (const v of views.values()) board.remove(v);
+  views.clear();
+  for (const entry of cellViews.values()) for (const obj of Object.values(entry)) if (obj) board.remove(obj);
+  cellViews.clear();
+  if (boardBase) {
+    board.remove(boardBase);
+    boardBase.traverse(o => o.geometry?.dispose());
+  }
+  boardBase = buildBoard(game);
+  board.add(boardBase);
+  if (world.groundY !== boardBase.userData.groundY) {
+    world.groundY = boardBase.userData.groundY;
+    world.decorate(world.groundY);
+  }
+  syncDisplay();
+  ui.setLevel(level, game.goals);
+  fitCamera();
+  busy = true;
+  refreshHUD();
+  ui.status(level.tip);
+
+  for (const cell of game.cells) {
+    if (cell.ice) setObstacle(cell.i, 'ice', cell.ice);
+    if (cell.crate) setObstacle(cell.i, 'crate', cell.crate);
+    if (cell.vine) setObstacle(cell.i, 'vine', 1);
+  }
+  const drops = [];
+  for (const cell of game.cells) {
+    if (!cell.piece) continue;
+    const v = makeView(cell.piece);
+    const to = posOf(cell.r, cell.c);
+    const from = to.clone().setY(to.y + 9);
+    v.position.copy(from);
+    const delay = (game.rows - cell.r) * 0.045 + cell.c * 0.02;
+    drops.push(wait(delay).then(() => animate(0.55, k => v.position.lerpVectors(from, to, k), easeOutBounce)));
+  }
+  if (banner) ui.banner(level, game.goals);
+  await Promise.all(drops);
+  if (token !== levelToken) return;
+  sfx.land();
+  busy = false;
+  lastAction = clockTime;
+  refreshHUD();
+}
 function easeOutBounce(t) {
   const n1 = 7.5625, d1 = 2.75;
   if (t < 1 / d1) return n1 * t * t;
@@ -215,511 +283,544 @@ function easeOutBounce(t) {
   if (t < 2.5 / d1) return n1 * (t -= 2.25 / d1) * t + 0.9375;
   return n1 * (t -= 2.625 / d1) * t + 0.984375;
 }
-function updateTweens(dt) {
-  for (let i = tweens.length - 1; i >= 0; i--) {
-    const tw = tweens[i];
-    tw.t = Math.min(1, tw.t + dt / tw.duration);
-    const k = tw.ease(tw.t);
-    for (const key in tw.to) tw.obj[key] = tw.from[key] + (tw.to[key] - tw.from[key]) * k;
-    if (tw.t >= 1) { tweens.splice(i, 1); tw.done(); }
-  }
-}
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// ---------- 粒子特效 ----------
-const particles = [];
-const particleGeo = new THREE.SphereGeometry(0.07, 8, 8);
-function burst(x, y, color) {
-  const mat = new THREE.MeshBasicMaterial({ color });
-  for (let i = 0; i < 12; i++) {
-    const p = new THREE.Mesh(particleGeo, mat);
-    p.position.set(x, y, 0.3);
-    const a = Math.random() * Math.PI * 2, s = 2 + Math.random() * 3;
-    p.userData.v = new THREE.Vector3(Math.cos(a) * s, Math.sin(a) * s, 1 + Math.random() * 2);
-    p.userData.life = 0.6;
-    scene.add(p);
-    particles.push(p);
-  }
-}
-function updateParticles(dt) {
-  for (let i = particles.length - 1; i >= 0; i--) {
-    const p = particles[i];
-    p.userData.life -= dt;
-    p.userData.v.y -= 9 * dt;
-    p.position.addScaledVector(p.userData.v, dt);
-    p.scale.setScalar(Math.max(0.001, p.userData.life / 0.6));
-    if (p.userData.life <= 0) { scene.remove(p); particles.splice(i, 1); }
+async function afterTurn() {
+  syncDisplay();
+  refreshHUD();
+  if (game.status === 'won') await celebrate();
+  else if (game.status === 'lost') { await wait(0.5); showLose(); }
+  else {
+    busy = false;
+    lastAction = clockTime;
+    refreshHUD();
   }
 }
 
-// ---------- 游戏状态 ----------
-const grid = [];           // grid[r][c] = gem mesh | null
-let progress;
-try { progress = readProgress(localStorage.getItem('happy-match3-progress')); }
-catch { progress = readProgress(null); }
-let levelIndex = progress.unlocked - 1;
-let level = LEVELS[levelIndex];
-let score = 0, moves = level.moves, busy = false, selected = null, gameOver = false;
-let energy = 0, collected = 0, activeSkill = null, won = false;
-let ice = Array(ROWS * COLS).fill(0);
-const iceGroup = new THREE.Group();
-scene.add(iceGroup);
-const iceGeometry = new THREE.PlaneGeometry(CELL * 0.92, CELL * 0.92);
-const iceMaterials = [null,
-  new THREE.MeshBasicMaterial({ color: 0x8be7ff, transparent: true, opacity: 0.32, depthWrite: false }),
-  new THREE.MeshBasicMaterial({ color: 0xb9cfff, transparent: true, opacity: 0.62, depthWrite: false })];
-function renderIce() {
-  iceGroup.clear();
-  ice.forEach((layers, i) => {
-    if (!layers) return;
-    const tile = new THREE.Mesh(iceGeometry, iceMaterials[layers]);
-    tile.position.set(colX(i % COLS), rowY(Math.floor(i / COLS)), 0.67);
-    iceGroup.add(tile);
+async function celebrate() {
+  ui.praise('目标达成！');
+  sfx.create();
+  // 满屏彩纸
+  for (let k = 0; k < 14; k++) {
+    wait(k * 0.06).then(() => {
+      const p = new THREE.Vector3((Math.random() - 0.5) * game.cols, (Math.random() - 0.3) * game.rows * 0.8, PIECE_Z);
+      fx.burst(p, ANIMALS[k % ANIMALS.length].color, { count: 10, speed: 4.5, solid: 12 });
+    });
+  }
+  await wait(1.1);
+  if (game.moves > 0) {
+    ui.praise('森林狂欢！', true);
+    ui.status('剩余步数变成疾风动物，全部引爆拿奖励分！');
+    await wait(0.7);
+  }
+  await playSteps(game.finale());
+  syncDisplay();
+  refreshHUD();
+  await wait(0.5);
+  await showWin();
+}
+
+async function showWin() {
+  const level = LEVELS[levelIndex];
+  const stars = starsFor(level, game.score);
+  progress.stars[levelIndex] = Math.max(progress.stars[levelIndex], stars);
+  progress.best[levelIndex] = Math.max(progress.best[levelIndex], game.score);
+  progress.unlocked = Math.min(LEVELS.length, Math.max(progress.unlocked, level.id + 1));
+  const saved = saveProgress();
+  const hasNext = levelIndex < LEVELS.length - 1;
+  const starEls = ui.showResult({
+    won: true, stars, score: game.score, best: progress.best[levelIndex], hasNext,
+    detail: `${stars === 3 ? '完美！三星通关！' : stars === 2 ? `再拿 ${level.stars[1] - game.score} 分就是三星啦。` : `达到 ${level.stars[0]} 分可以拿到二星。`}${saved ? '' : '（浏览器无法保存进度）'}`,
   });
-}
-function setupIce() {
-  ice.fill(0);
-  const cells = Array.from({ length: ROWS * COLS }, (_, i) => i);
-  for (let i = cells.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [cells[i], cells[j]] = [cells[j], cells[i]];
+  sfx.win();
+  busy = false;
+  refreshHUD();
+  for (let k = 0; k < stars; k++) {
+    await wait(0.38);
+    starEls[k].classList.add('lit');
+    sfx.star(k);
   }
-  cells.slice(0, level.iceCount).forEach(i => { ice[i] = level.iceLayers; });
-  renderIce();
 }
-const iceLeft = () => ice.reduce((a, b) => a + b, 0);
-function notice(message) { $('status').textContent = message; }
 
-const gemGroup = new THREE.Group();
-scene.add(gemGroup);
+function showLose() {
+  const missing = game.goals.filter(g => g.current < g.target).map(g => `${goalLabel(g)}还差 ${g.target - g.current}`);
+  ui.showResult({ won: false, stars: 0, score: game.score, best: progress.best[levelIndex], hasNext: false, detail: `${missing.join('，')}。用好特效和道具，再来一次吧！` });
+  sfx.lose();
+  busy = false;
+  refreshHUD();
+}
 
-const $ = id => document.getElementById(id);
-function updateHUD(combo) {
-  $('score').textContent = score;
-  $('moves').textContent = moves;
-  $('combo').textContent = combo > 1 ? `x${combo}` : '-';
-  $('level-title').textContent = `第 ${level.id} 关 · ${level.name}`;
-  $('score-target').textContent = level.targetScore;
-  $('score-progress').value = Math.min(score, level.targetScore);
-  $('score-progress').max = level.targetScore;
-  $('collect-goal').textContent = level.collect ? `${GEM_DEFS[level.collectType].name} ${Math.min(collected, level.collect)} / ${level.collect}` : '本关无需收集';
-  $('ice-goal').textContent = level.iceCount ? `剩余 ${iceLeft()} 层冰` : '本关没有冰层';
-  $('energy').textContent = `${energy} / 60`;
-  $('energy-progress').value = energy;
-  for (const [kind, skill] of Object.entries(SKILLS)) {
-    const button = $(`skill-${kind}`);
-    button.disabled = busy || gameOver || energy < skill.cost;
-    button.classList.toggle('active', activeSkill === kind);
-    button.setAttribute('aria-pressed', String(activeSkill === kind));
+// ---------- 播放引擎步骤 ----------
+async function playSteps(steps, { countMove = false } = {}) {
+  let first = true;
+  for (const step of steps) {
+    if (step.type === 'swap') await playSwap(step, countMove && first && !step.back);
+    else if (step.type === 'clear') await playClear(step);
+    else if (step.type === 'fall') await playFall(step);
+    else if (step.type === 'collect') await playCollect(step);
+    else if (step.type === 'shuffle') await playShuffle(step);
+    else if (step.type === 'convert') await playConvert(step);
+    first = false;
   }
-  $('restart').disabled = busy;
-  $('level-select').disabled = busy;
-
 }
 
-function makeGem(type, r, c) {
-  const mesh = prototypes[type].clone();
-  mesh.userData = { type, r, c, spin: (Math.random() - 0.5) * 0.8, phase: Math.random() * Math.PI * 2 };
-  mesh.position.set(colX(c), rowY(r), 0.15);
-  gemGroup.add(mesh);
-  return mesh;
+async function playSwap(step, consume) {
+  const [va, vb] = step.ids.map(id => views.get(id));
+  const pa = posOf(...step.a), pb = posOf(...step.b);
+  if (consume) { display.moves--; refreshHUD(); }
+  if (!step.back) sfx.swap();
+  await animate(0.17, k => {
+    va.position.lerpVectors(pa, pb, k);
+    vb.position.lerpVectors(pb, pa, k);
+    va.position.z = PIECE_Z + Math.sin(k * Math.PI) * 0.35;
+    vb.position.z = PIECE_Z - Math.sin(k * Math.PI) * 0.12;
+  }, easeInOut);
+  if (step.back) sfx.invalid();
 }
 
-function randomTypeNoMatch(r, c) {
-  const banned = new Set();
-  if (c >= 2 && grid[r][c - 1] && grid[r][c - 2] && grid[r][c - 1].userData.type === grid[r][c - 2].userData.type)
-    banned.add(grid[r][c - 1].userData.type);
-  if (r >= 2 && grid[r - 1][c] && grid[r - 2][c] && grid[r - 1][c].userData.type === grid[r - 2][c].userData.type)
-    banned.add(grid[r - 1][c].userData.type);
-  let t;
-  do { t = Math.floor(Math.random() * level.types); } while (banned.has(t));
-  return t;
+const PRAISE = ['', '', '不错！', '真棒！', '太厉害了！', '无与伦比！', '森林之王！'];
+async function playClear(step) {
+  const jobs = [wait(step.duration)];
+  const at = (delay, fn) => jobs.push(wait(delay).then(fn));
+  const comboEffect = step.effects.find(e => e.kind === 'board') ? '彩虹风暴！' : step.converts.length ? '魔法连锁！' : null;
+  if (comboEffect) ui.praise(comboEffect, true);
+  else if (step.combo >= 2) ui.praise(PRAISE[Math.min(step.combo, PRAISE.length - 1)]);
+  for (const e of step.effects) at(e.delay, () => playEffect(e));
+  for (const h of step.hits) at(h.delay, () => popView(h));
+  for (const c of step.created) at(c.delay, () => createdView(c));
+  for (const c of step.converts) at(c.delay, () => {
+    const v = views.get(c.id);
+    if (!v) return;
+    setSpecial(v, c.special);
+    fx.twinkle(v.position, '#ffe27a', 4);
+    sfx.convert(step.converts.indexOf(c));
+  });
+  for (const o of step.obstacles) at(o.delay, () => obstacleHit(o));
+  let shown = 0;
+  const colorAt = new Map();
+  for (const h of step.hits) { const v = views.get(h.id); if (v && !colorAt.has(h.i)) colorAt.set(h.i, colorOf(v)); }
+  for (const p of step.popups) at(p.delay + 0.15, () => {
+    const s = toScreen(posOfI(p.i).setZ(PIECE_Z + 0.5));
+    ui.popup(s.x, s.y, `+${p.amount}`, colorAt.get(p.i) ?? '#ffb31f');
+    display.score += p.amount;
+    shown += p.amount;
+    refreshHUD();
+  });
+  await Promise.all(jobs);
+  display.score += step.score - shown;
+  refreshHUD();
 }
 
-async function initBoard() {
-  gemGroup.clear();
-  grid.length = 0;
-  for (let r = 0; r < ROWS; r++) {
-    grid.push([]);
-    for (let c = 0; c < COLS; c++) grid[r].push(null);
+function playEffect(e) {
+  const p = posOfI(e.i);
+  if (e.kind === 'row' || e.kind === 'col') {
+    fx.beam(p, e.kind, 0xffc93c, (e.kind === 'row' ? game.cols : game.rows) * CELL + 0.6);
+    sfx.line();
+    shake = Math.max(shake, 0.08);
+  } else if (e.kind === 'bomb') {
+    fx.ring(p, 0xffa53d, 1.1 + e.radius * 1.2);
+    fx.ring(p, 0xffffff, 0.7 + e.radius * 0.8, 0.35);
+    fx.burst(p, '#ffc04d', { count: 22, speed: 5, solid: 10 });
+    sfx.bomb();
+    shake = Math.max(shake, 0.16 + e.radius * 0.1);
+  } else if (e.kind === 'rainbow') {
+    sfx.rainbow();
+    const color = ANIMALS[e.type]?.color ?? '#ffffff';
+    fx.twinkle(p, '#ffffff', 12, 0.9);
+    e.targets.forEach((t, k) => wait(0.05 + k * 0.025).then(() => fx.arc(p, posOfI(t), color)));
+  } else if (e.kind === 'board') {
+    fx.flash(0xffffff, 0.9, 40);
+    sfx.rainbow();
+    sfx.bomb();
+    shake = 0.5;
+  } else if (e.kind === 'hammer') {
+    fx.hammer(p, () => { sfx.hammer(); fx.ring(p, 0xffffff, 1.3, 0.3); shake = Math.max(shake, 0.18); });
   }
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      const g = makeGem(randomTypeNoMatch(r, c), r, c);
-      g.position.y = rowY(r) + 12;
-      grid[r][c] = g;
-    }
-  }
-  if (!hasPossibleMove()) return initBoard();
-  const anims = [];
-  for (let r = 0; r < ROWS; r++)
-    for (let c = 0; c < COLS; c++) {
-      anims.push(sleep((ROWS - r) * 40 + c * 20).then(() => tween(grid[r][c].position, { y: rowY(r) }, 0.6, { ease: easeOutBounce })));
-    }
-  await Promise.all(anims);
 }
 
-// ---------- 匹配逻辑 ----------
-function findMatches() {
-  const matched = new Set();
-  for (let r = 0; r < ROWS; r++) {
-    let run = 1;
-    for (let c = 1; c <= COLS; c++) {
-      const same = c < COLS && grid[r][c] && grid[r][c - 1] && grid[r][c].userData.type === grid[r][c - 1].userData.type;
-      if (same) run++;
-      else { if (run >= 3) for (let k = c - run; k < c; k++) matched.add(r * COLS + k); run = 1; }
-    }
+function popView(h) {
+  const v = views.get(h.id);
+  if (!v) return;
+  views.delete(h.id);
+  if (v.userData.kind === 'animal') bumpGoal('collect', v.userData.type, 1);
+  if (h.into !== null && h.into !== h.i) {
+    const from = v.position.clone(), to = posOfI(h.into);
+    animate(0.2, k => { v.position.lerpVectors(from, to, k); v.scale.setScalar(1 - k * 0.7); }, easeInCubic).then(() => board.remove(v));
+    return;
   }
-  for (let c = 0; c < COLS; c++) {
-    let run = 1;
-    for (let r = 1; r <= ROWS; r++) {
-      const same = r < ROWS && grid[r][c] && grid[r - 1][c] && grid[r][c].userData.type === grid[r - 1][c].userData.type;
-      if (same) run++;
-      else { if (run >= 3) for (let k = r - run; k < r; k++) matched.add(k * COLS + c); run = 1; }
-    }
-  }
-  return matched;
+  fx.burst(v.position, colorOf(v));
+  if (v.userData.eyes) v.userData.eyes.scale.y = 0.3;
+  animate(0.24, k => {
+    const s = k < 0.3 ? 1 + (k / 0.3) * 0.28 : 1.28 * (1 - (k - 0.3) / 0.7);
+    v.scale.setScalar(Math.max(0.001, s));
+    v.rotation.z = k * 0.7;
+  }).then(() => board.remove(v));
 }
 
-function swapCells(a, b) {
-  const ga = grid[a.r][a.c], gb = grid[b.r][b.c];
-  grid[a.r][a.c] = gb; grid[b.r][b.c] = ga;
-  if (ga) { ga.userData.r = b.r; ga.userData.c = b.c; }
-  if (gb) { gb.userData.r = a.r; gb.userData.c = a.c; }
+function createdView(c) {
+  const v = makeView(c.piece);
+  v.position.copy(posOfI(c.i));
+  v.scale.setScalar(0.001);
+  animate(0.35, k => v.scale.setScalar(Math.max(0.001, k)), easeOutBack);
+  fx.twinkle(v.position, colorOf(v), 8, 0.8);
+  sfx.create();
 }
 
-function hasPossibleMove() {
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      for (const [dr, dc] of [[0, 1], [1, 0]]) {
-        const r2 = r + dr, c2 = c + dc;
-        if (r2 >= ROWS || c2 >= COLS) continue;
-        swapCells({ r, c }, { r: r2, c: c2 });
-        const ok = findMatches().size > 0;
-        swapCells({ r, c }, { r: r2, c: c2 });
-        if (ok) return true;
+function obstacleHit(o) {
+  const p = posOfI(o.i).setZ(0.25);
+  bumpGoal(o.kind, null, o.layers);
+  setObstacle(o.i, o.kind, o.left);
+  if (o.kind === 'ice') { fx.debris(p, 0xbde8ff, 10, 0.2); sfx.ice(); }
+  else if (o.kind === 'crate') {
+    fx.debris(p, 0xb7773d, o.left ? 8 : 16, 0.26);
+    if (o.left === 1) fx.debris(p, 0x9aa3b0, 6, 0.18);
+    sfx.crate();
+    shake = Math.max(shake, 0.06);
+  } else { fx.debris(p, 0x66c23e, 12, 0.2); sfx.vine(); }
+}
+
+async function playFall(step) {
+  const items = step.moves.map(m => {
+    let v = views.get(m.id);
+    if (!v) { v = makeView(m.spawn); v.scale.setScalar(0.001); }
+    const pts = m.path.map(pt => posOf(pt.r, pt.c));
+    v.position.copy(pts[0]);
+    return { v, path: m.path, pts, spawn: !!m.spawn, end: m.path[m.path.length - 1].t };
+  });
+  const total = step.ticks * TICK + 0.16;
+  await animate(total, (_, raw) => {
+    const time = raw * total, tt = time / TICK;
+    for (const it of items) {
+      const { v, path, pts } = it;
+      if (tt >= it.end) {
+        v.position.copy(pts[pts.length - 1]);
+        const s = Math.min(1, (time - it.end * TICK) / 0.16);
+        const w = Math.sin(s * Math.PI) * (1 - s);
+        v.scale.set(1 + 0.12 * w, 1 - 0.16 * w, 1);
+        continue;
       }
-    }
-  }
-  return false;
-}
-
-// 让两个宝石分别移动到各自 userData 中记录的逻辑格子
-async function animateToCell(...gems) {
-  await Promise.all(gems.map(g => tween(g.position, { x: colX(g.userData.c), y: rowY(g.userData.r) }, 0.22)));
-}
-
-async function removeMatches(matched, combo, charge = true, shatter = false) {
-  const gems = [...matched].map(i => grid[Math.floor(i / COLS)][i % COLS]);
-  score += gems.length * 10 * combo;
-  if (charge) energy = Math.min(60, energy + gems.length);
-  collected += gems.filter(g => g.userData.type === level.collectType).length;
-  for (const i of matched) ice[i] = Math.max(0, ice[i] - (shatter ? 2 : 1));
-  renderIce();
-  updateHUD(combo);
-  sfx.pop(combo, gems.length);
-  await Promise.all(gems.map(g => {
-    burst(g.position.x, g.position.y, GEM_DEFS[g.userData.type].color);
-    return tween(g.scale, { x: 0.01, y: 0.01, z: 0.01 }, 0.25).then(() => gemGroup.remove(g));
-  }));
-  for (const i of matched) grid[Math.floor(i / COLS)][i % COLS] = null;
-}
-
-async function applyGravityAndRefill() {
-  const anims = [];
-  for (let c = 0; c < COLS; c++) {
-    let write = ROWS - 1;
-    for (let r = ROWS - 1; r >= 0; r--) {
-      const g = grid[r][c];
-      if (!g) continue;
-      if (write !== r) {
-        grid[write][c] = g; grid[r][c] = null;
-        g.userData.r = write;
-        anims.push(tween(g.position, { x: colX(c), y: rowY(write) }, 0.35 + (write - r) * 0.05, { ease: easeOutBounce }));
+      if (tt <= path[0].t) v.position.copy(pts[0]);
+      else {
+        let k = 0;
+        while (k < path.length - 2 && path[k + 1].t <= tt) k++;
+        const f = (tt - path[k].t) / (path[k + 1].t - path[k].t);
+        v.position.lerpVectors(pts[k], pts[k + 1], Math.min(1, f));
       }
-      write--;
+      if (it.spawn) v.scale.setScalar(Math.max(0.001, Math.min(1, tt - path[0].t)));
     }
-    // 补充新宝石
-    let spawn = 1;
-    for (let r = write; r >= 0; r--, spawn++) {
-      const g = makeGem(Math.floor(Math.random() * level.types), r, c);
-      g.position.y = rowY(0) + spawn * CELL + 0.5;
-      grid[r][c] = g;
-      anims.push(tween(g.position, { y: rowY(r) }, 0.45 + spawn * 0.05, { ease: easeOutBounce }));
-    }
-  }
-  await Promise.all(anims);
+  });
   sfx.land();
 }
 
-async function resolveBoard(charge = true) {
-  let combo = 1;
-  let matched = findMatches();
-  while (matched.size > 0) {
-    await removeMatches(matched, combo, charge);
-    await applyGravityAndRefill();
-    combo++;
-    matched = findMatches();
-  }
-  updateHUD(1);
-  if (moves > 0 && !objectivesMet(level, score, collected, iceLeft()) && !hasPossibleMove()) {
-    notice('没有可用交换，已为你免费洗牌。');
-    await sleep(300);
-    await reshuffle();
-  }
-}
-
-async function reshuffle() {
-  sfx.shuffle();
-  // 打散所有宝石并重新生成（保留分数/步数）
-  await Promise.all(gemGroup.children.map(g => tween(g.scale, { x: 0.01, y: 0.01, z: 0.01 }, 0.3)));
-  await initBoard();
-}
-
-// ---------- 交互 ----------
-const raycaster = new THREE.Raycaster();
-const pointer = new THREE.Vector2();
-
-function pickGem(ev) {
-  const rect = renderer.domElement.getBoundingClientRect();
-  pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
-  pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(pointer, camera);
-  const hit = raycaster.intersectObjects(gemGroup.children, true)[0];
-  if (!hit) return null;
-  let o = hit.object;
-  while (o.parent && o.parent !== gemGroup) o = o.parent;
-  return o.parent === gemGroup ? o : null;
-}
-
-function setSelected(g) {
-  selected = g;
-  if (g) {
-    selector.visible = true;
-    selector.position.x = g.position.x;
-    selector.position.y = g.position.y;
-  } else selector.visible = false;
-}
-
-async function trySwap(ga, gb) {
-  const a = { r: ga.userData.r, c: ga.userData.c }, b = { r: gb.userData.r, c: gb.userData.c };
-  busy = true;
-  updateHUD(1);
-  setSelected(null);
-  swapCells(a, b);
-  sfx.swap();
-  await animateToCell(ga, gb);
-  if (findMatches().size === 0) {
-    sfx.invalid();
-    await sleep(80);
-    swapCells(a, b);
-    await animateToCell(ga, gb);
-    busy = false;
-    updateHUD(1);
-    notice('这次交换无法消除，不扣步数。');
-    return;
-  }
-  moves--;
-  updateHUD(1);
-  await resolveBoard();
-  busy = false;
-  checkOutcome();
-  updateHUD(1);
-}
-
-renderer.domElement.addEventListener('pointerdown', ev => {
-  unlock();
-  if (busy || gameOver) return;
-  const g = pickGem(ev);
-  if (!g) { setSelected(null); return; }
-  if (activeSkill) { useSkill(g); return; }
-  if (!selected) { setSelected(g); sfx.select(); return; }
-  if (g === selected) { setSelected(null); return; }
-  const dr = Math.abs(g.userData.r - selected.userData.r), dc = Math.abs(g.userData.c - selected.userData.c);
-  if (dr + dc === 1) trySwap(selected, g);
-  else setSelected(g);
-});
-
-// 悬停高亮
-let hovered = null;
-renderer.domElement.addEventListener('pointermove', ev => {
-  if (busy) return;
-  const g = pickGem(ev);
-  if (hovered && hovered !== g) hovered.userData.hover = false;
-  hovered = g;
-  if (g) g.userData.hover = true;
-  renderer.domElement.style.cursor = g ? 'pointer' : 'default';
-});
-
-function refreshLevels() {
-  $('level-select').replaceChildren(...LEVELS.map((item, i) => {
-    const option = document.createElement('option');
-    option.value = i;
-    option.disabled = item.id > progress.unlocked;
-    option.textContent = `${item.id > progress.unlocked ? '🔒 ' : ''}${item.id}. ${item.name} ${'★'.repeat(progress.stars[i])}`;
-    return option;
+async function playCollect(step) {
+  sfx.acorn();
+  await Promise.all(step.items.map(item => {
+    const v = views.get(item.id);
+    if (!v) return null;
+    views.delete(item.id);
+    bumpGoal('acorn', null, 1);
+    fx.twinkle(v.position, '#ffd36b', 10, 0.8);
+    const from = v.position.clone();
+    return animate(0.5, k => {
+      v.position.set(from.x, from.y - k * 0.9, from.z + Math.sin(k * Math.PI) * 0.6);
+      v.scale.setScalar(Math.max(0.001, 1 - k * 0.8));
+      v.rotation.z = k * 4;
+    }, easeInCubic).then(() => board.remove(v));
   }));
-  $('level-select').value = levelIndex;
-}
-function checkOutcome() {
-  const outcome = outcomeFor(level, score, collected, iceLeft(), moves);
-  if (outcome !== 'playing') endGame(outcome === 'won');
-}
-function endGame(success) {
-  gameOver = true;
-  won = success;
-  activeSkill = null;
-  setSelected(null);
-  sfx.gameOver();
-  const stars = starsFor(moves, level.moves);
-  let saved = true;
-  if (success) {
-    progress.stars[levelIndex] = Math.max(progress.stars[levelIndex], stars);
-    progress.unlocked = Math.min(LEVELS.length, Math.max(progress.unlocked, level.id + 1));
-    try { localStorage.setItem('happy-match3-progress', JSON.stringify(progress)); } catch { saved = false; }
-    refreshLevels();
-  }
-  $('result-title').textContent = success ? (level.id === 12 ? '恭喜完成全部关卡！' : '关卡通过！') : '还差一点点';
-  $('result-stars').textContent = success ? '★'.repeat(stars) + '☆'.repeat(3 - stars) : '再试一次';
-  $('result-detail').textContent = success
-    ? `全部目标完成，剩余 ${moves} 步。${saved ? '星级与解锁进度已保存。' : '浏览器无法保存进度，本次会话仍可继续。'}`
-    : `未完成：${[score < level.targetScore ? `分数还差 ${level.targetScore - score}` : '', collected < level.collect ? `${GEM_DEFS[level.collectType].name}还差 ${level.collect - collected} 只` : '', iceLeft() ? `还有 ${iceLeft()} 层冰` : ''].filter(Boolean).join('、')}`;
-  $('final-score').textContent = score;
-  $('next-level').hidden = !success || level.id === LEVELS.length;
-  $('overlay').classList.remove('hidden');
-  $('next-level').hidden ? $('play-again').focus() : $('next-level').focus();
+  display.score += step.score;
+  const s = toScreen(posOfI(step.items[0].i));
+  ui.popup(s.x, s.y, `+${step.score}`, '#ffd36b');
+  refreshHUD();
 }
 
-async function restart(index = levelIndex) {
-  if (busy) return;
-  busy = true;
-  levelIndex = index;
-  level = LEVELS[levelIndex];
-  $('overlay').classList.add('hidden');
-  gameOver = false;
-  won = false;
-  score = 0; moves = level.moves; energy = 12; collected = 0; activeSkill = null;
-  setSelected(null);
-  setupIce();
-  refreshLevels();
-  updateHUD(1);
-  notice(`完成全部目标即可过关。${level.iceLayers === 2 ? '深蓝冰块需要消除两次。' : '消除冰块上的动物可以破冰。'}`);
-  await initBoard();
-  busy = false;
-  updateHUD(1);
+async function playShuffle(step) {
+  sfx.shuffle();
+  ui.status('棋盘重新洗牌啦！');
+  const items = step.moves.map(m => {
+    let v = views.get(m.id);
+    if (v && (v.userData.type !== m.piece.type || v.userData.special !== m.piece.special)) {
+      const old = v.position.clone();
+      dropView(v);
+      v = makeView(m.piece);
+      v.position.copy(old);
+    }
+    return { v, from: v.position.clone(), to: posOf(m.r, m.c) };
+  });
+  const center = new THREE.Vector3(0, 0, PIECE_Z);
+  const tmp = new THREE.Vector3();
+  await animate(0.8, k => {
+    const e = easeInOut(k), swirl = Math.sin(k * Math.PI);
+    for (const { v, from, to } of items) {
+      tmp.lerpVectors(from, to, e).sub(center).multiplyScalar(1 - 0.55 * swirl);
+      const a = swirl * 1.4;
+      v.position.set(tmp.x * Math.cos(a) - tmp.y * Math.sin(a), tmp.x * Math.sin(a) + tmp.y * Math.cos(a), PIECE_Z + swirl * 0.6);
+      v.rotation.z = k * Math.PI * 2;
+    }
+  });
+  for (const { v, to } of items) { v.position.copy(to); v.rotation.z = 0; }
 }
 
-async function useSkill(g) {
-  const kind = activeSkill;
-  if (busy || gameOver || !kind || energy < SKILLS[kind].cost) return;
-  busy = true;
-  activeSkill = null;
-  setSelected(null);
-  energy -= SKILLS[kind].cost;
-  updateHUD(1);
-  notice(`${SKILLS[kind].name}已释放，不消耗步数。`);
-  if (kind === 'shuffle') await reshuffle();
-  else {
-    const cells = skillCells(kind, g.userData.r, g.userData.c, grid.map(row => row.map(gem => gem.userData.type)));
-    await removeMatches(cells, 1, false, kind === 'hammer');
-    await applyGravityAndRefill();
-    await resolveBoard(false);
-  }
-  busy = false;
-  checkOutcome();
-  updateHUD(1);
+async function playConvert(step) {
+  const jobs = step.items.map((item, k) => wait(item.delay).then(() => {
+    const v = views.get(item.id);
+    if (v) { setSpecial(v, item.special); fx.twinkle(v.position, '#ffe27a', 6, 0.6); }
+    display.moves = Math.max(0, display.moves - 1);
+    refreshHUD();
+    sfx.convert(k);
+  }));
+  await Promise.all(jobs);
+  display.score += step.score;
+  refreshHUD();
+  await wait(0.5);
 }
-for (const [kind, skill] of Object.entries(SKILLS)) {
-  $(`skill-${kind}`).addEventListener('click', () => {
-    unlock();
-    if (busy || gameOver || energy < skill.cost) return;
-    activeSkill = activeSkill === kind ? null : kind;
-    setSelected(null);
-    if (activeSkill === 'shuffle') { useSkill(null); return; }
-    notice(activeSkill ? `${skill.description}；再次点击技能或按 Esc 取消。` : '技能已取消，可以继续交换动物。');
-    updateHUD(1);
+
+// ---------- 玩家输入 ----------
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+const piecePlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -PIECE_Z);
+function pointerWorld(e) {
+  ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  return raycaster.ray.intersectPlane(piecePlane, new THREE.Vector3());
+}
+function cellAt(p) {
+  if (!p || !game) return null;
+  const c = Math.round(p.x / CELL + (game.cols - 1) / 2), r = Math.round((game.rows - 1) / 2 - p.y / CELL);
+  const cell = game.cell(r, c);
+  return cell && !cell.void ? cell : null;
+}
+const overlayOpen = () => ui.mapOpen() || ui.resultOpen();
+const canAct = () => game && !busy && game.status === 'playing' && !overlayOpen();
+
+function select(cell) {
+  selected = cell;
+  selFrame.visible = !!cell;
+  if (cell) {
+    const p = posOf(cell.r, cell.c);
+    selFrame.position.set(p.x, p.y, 0.01);
+    sfx.select();
+  }
+}
+function showPreview(cells) {
+  while (previewFrames.length < cells.length) {
+    const m = new THREE.Mesh(selFrame.geometry, previewMat);
+    board.add(m);
+    previewFrames.push(m);
+  }
+  previewFrames.forEach((m, k) => {
+    m.visible = k < cells.length;
+    if (m.visible) { const p = posOf(cells[k].r, cells[k].c); m.position.set(p.x, p.y, 0.012); }
   });
 }
-addEventListener('keydown', ev => {
-  if (ev.key === 'Escape') { activeSkill = null; setSelected(null); updateHUD(1); notice('已取消选择。'); }
-});
-$('restart').addEventListener('click', () => { unlock(); restart(); });
-$('next-level').addEventListener('click', () => { if (won && levelIndex < 11) restart(levelIndex + 1); });
-$('level-select').addEventListener('change', ev => {
-  const index = Number(ev.target.value);
-  if (Number.isInteger(index) && index >= 0 && index < progress.unlocked) restart(index);
-});
-$('mute').addEventListener('click', () => {
-  unlock();
-  setMuted(!isMuted());
-  $('mute').textContent = isMuted() ? '🔇 已静音' : '🔊 声音开';
-});
-$('play-again').addEventListener('click', () => { unlock(); restart(); });
+function skillArea(kind, cell) {
+  if (!cell) return [];
+  if (kind === 'hammer') return [cell];
+  if (kind === 'bomb') return game.areaCells(cell, 1).map(({ i }) => game.cells[i]).filter(c => !c.void);
+  if (kind === 'rainbow') { const t = game.typeAt(cell); return t < 0 ? [] : game.cells.filter(c => game.typeAt(c) === t); }
+  return [];
+}
+function nudge(cell) {
+  const v = cell.piece && views.get(cell.piece.id);
+  ui.status(cell.crate ? '木箱不能移动，在旁边消除就能敲开它。' : cell.vine ? '藤蔓缠住了它！让它参与一次消除就能解开。' : '这里不能移动。');
+  sfx.invalid();
+  if (v) {
+    const x = v.position.x;
+    animate(0.3, k => { v.position.x = x + Math.sin(k * Math.PI * 6) * 0.06 * (1 - k); });
+  }
+}
 
-// ---------- 渲染循环 ----------
+async function doSwap(a, b) {
+  if (!canAct()) return;
+  const target = game.cell(...b);
+  if (!target || target.void) return;
+  const res = game.trySwap(a, b);
+  if (res.reason === 'locked') { nudge(game.swappable(game.cell(...a)) ? target : game.cell(...a)); return; }
+  if (res.reason === 'far') return;
+  busy = true;
+  refreshHUD();
+  await playSteps(res.steps, { countMove: res.valid });
+  if (!res.valid) {
+    ui.status('这样交换连不成三个哦，换个位置试试。');
+    busy = false;
+    refreshHUD();
+    return;
+  }
+  ui.status('');
+  await afterTurn();
+}
+
+async function castSkill(kind, cell) {
+  const res = game.useSkill(kind, cell?.r ?? 0, cell?.c ?? 0);
+  if (!res.ok) { ui.status(kind === 'rainbow' ? '彩虹魔法要点在动物身上哦。' : '这里不能使用道具。'); return; }
+  activeSkill = null;
+  showPreview([]);
+  busy = true;
+  display.energy = game.energy;
+  refreshHUD();
+  ui.status(`${SKILLS[kind].name}！道具不消耗步数。`);
+  await playSteps(res.steps);
+  await afterTurn();
+}
+
+canvas.addEventListener('pointerdown', e => {
+  unlock();
+  const p = pointerWorld(e);
+  if (p) { lookTarget.copy(p); lookUntil = clockTime + 3; }
+  if (!canAct()) return;
+  lastAction = clockTime;
+  clearHint();
+  const cell = cellAt(p);
+  if (!cell) { select(null); return; }
+  if (activeSkill) { castSkill(activeSkill, cell); return; }
+  if (!game.swappable(cell)) { select(null); nudge(cell); return; }
+  if (selected && selected !== cell && Math.abs(selected.r - cell.r) + Math.abs(selected.c - cell.c) === 1) {
+    const from = selected;
+    select(null);
+    doSwap([from.r, from.c], [cell.r, cell.c]);
+    return;
+  }
+  if (selected === cell) { select(null); return; }
+  select(cell);
+  drag = { cell, x: e.clientX, y: e.clientY, id: e.pointerId };
+  canvas.setPointerCapture?.(e.pointerId);
+});
+canvas.addEventListener('pointermove', e => {
+  const p = pointerWorld(e);
+  if (p) { lookTarget.copy(p); lookUntil = clockTime + 3; }
+  if (activeSkill && canAct()) showPreview(skillArea(activeSkill, cellAt(p)));
+  canvas.style.cursor = canAct() && cellAt(p) ? 'pointer' : 'default';
+  if (!drag || e.pointerId !== drag.id || !canAct()) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  const a = toScreen(posOf(0, 0)), b = toScreen(posOf(0, 1));
+  const threshold = Math.max(10, (b.x - a.x) * 0.3);
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < threshold) return;
+  const [dr, dc] = Math.abs(dx) > Math.abs(dy) ? [0, Math.sign(dx)] : [Math.sign(dy), 0];
+  const from = drag.cell;
+  drag = null;
+  select(null);
+  doSwap([from.r, from.c], [from.r + dr, from.c + dc]);
+});
+const endDrag = () => { drag = null; };
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (ui.mapOpen() && game?.status === 'playing') { ui.hideMap(); return; }
+  activeSkill = null;
+  select(null);
+  showPreview([]);
+  refreshHUD();
+  ui.status('已取消选择。');
+});
+
+// ---------- 提示 ----------
+function clearHint() { hint = null; }
+function updateHint() {
+  if (hint || !canAct() || activeSkill || clockTime - lastAction < HINT_DELAY) return;
+  const h = game.hint();
+  if (!h) return;
+  const ca = game.cell(...h.a), cb = game.cell(...h.b);
+  hint = { ids: [ca.piece.id, cb.piece.id], dir: [h.b[1] - h.a[1], h.a[0] - h.b[0]], start: clockTime };
+}
+
+// ---------- 每帧更新 ----------
 const clock = new THREE.Clock();
-function animate() {
-  requestAnimationFrame(animate);
-  const dt = Math.min(clock.getDelta(), 0.05);
-  const t = clock.elapsedTime;
-  updateTweens(dt);
-  updateParticles(dt);
-  for (const g of gemGroup.children) {
-    g.rotation.y = Math.sin(t * 1.2 + g.userData.phase) * 0.35;
-    g.rotation.z = Math.sin(t * 1.8 + g.userData.phase) * 0.08;
-    const target = g.userData.hover || g === selected ? 1.2 : 1;
-    if (!tweens.some(tw => tw.obj === g.scale)) {
-      g.scale.x += (target - g.scale.x) * 0.2;
-      g.scale.y += (target - g.scale.y) * 0.2;
-      g.scale.z += (target - g.scale.z) * 0.2;
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 0.05) * timeScale;
+  clockTime += dt;
+  const t = clockTime;
+  tickAnims(dt);
+  fx.update(dt);
+  world.update(t, dt);
+  updateHint();
+  const looking = t < lookUntil;
+  const selId = selected?.piece?.id;
+  for (const v of views.values()) {
+    const u = v.userData;
+    if (!u.body) continue;
+    if (u.eyes) {
+      const bt = t - u.blink;
+      if (bt > 0) {
+        u.eyes.scale.y = bt < 0.14 ? Math.max(0.12, Math.abs(1 - bt / 0.07)) : 1;
+        if (bt >= 0.14) u.blink = t + 2 + Math.random() * 5;
+      }
+    }
+    let ry, rx;
+    if (looking) {
+      ry = THREE.MathUtils.clamp((lookTarget.x - v.position.x) * 0.12, -0.5, 0.5);
+      rx = THREE.MathUtils.clamp(-(lookTarget.y - v.position.y) * 0.12, -0.4, 0.4);
+    } else {
+      ry = Math.sin(t * 0.7 + u.phase) * 0.2;
+      rx = Math.sin(t * 0.9 + u.phase) * 0.06;
+    }
+    const ease = Math.min(1, dt * 6);
+    u.body.rotation.y += (ry - u.body.rotation.y) * ease;
+    u.body.rotation.x += (rx - u.body.rotation.x) * ease;
+    let ox = 0, oy = Math.sin(t * 2.2 + u.phase) * 0.012;
+    if (u.id === selId) oy += Math.abs(Math.sin(t * 7)) * 0.1;
+    if (hint && hint.ids.includes(u.id)) {
+      const w = (t - hint.start) % 1.8;
+      if (w < 0.7) {
+        const s = Math.sin((w / 0.7) * Math.PI * 4) * 0.08 * (u.id === hint.ids[0] ? 1 : -1);
+        ox = hint.dir[0] * s; oy += hint.dir[1] * s;
+      }
+    }
+    u.body.position.set(ox, oy, 0);
+    if (u.gem) { u.gem.rotation.y += dt * 1.2; u.gem.rotation.x += dt * 0.5; }
+    if (u.orbit) u.orbit.rotation.z += dt * 1.6;
+    if (u.deco) {
+      for (const child of u.deco.children) {
+        if (child.name === 'arrow') child.position.x = child.userData.dir * (0.44 + Math.sin(t * 6) * 0.035);
+        else if (child.name === 'spin') child.rotation.z += dt * 1.4;
+        else if (child.name === 'halo') child.scale.setScalar(1.3 + Math.sin(t * 5) * 0.1);
+      }
     }
   }
-  selector.rotation.z += dt;
-  selector.material.opacity = 0.6 + Math.sin(t * 6) * 0.3;
-  camera.position.x = Math.sin(t * 0.2) * 0.4;
-  camera.lookAt(0, 0, 0);
+  if (selFrame.visible) selFrame.material.opacity = 0.75 + Math.sin(t * 6) * 0.25;
+  previewMat.opacity = 0.7 + Math.sin(t * 6) * 0.3;
+  for (const arrow of boardBase?.userData.exits ?? []) arrow.position.y = arrow.userData.baseY + Math.sin(t * 4) * 0.06;
+  shake *= Math.exp(-dt * 7);
+  camera.position.set(camBase.x + (Math.random() - 0.5) * shake, camBase.y + (Math.random() - 0.5) * shake + camBase.z * 0.05, camBase.z);
+  camera.lookAt(camBase.x, camBase.y, 0);
   renderer.render(scene, camera);
 }
 
-function resizeGame() {
-  const mobile = innerWidth <= 760;
-  const left = mobile ? 0 : 320;
-  const top = mobile ? 245 : 0;
-  const width = Math.max(1, innerWidth - left);
-  const height = Math.max(1, innerHeight - top - (mobile ? 164 : 110));
-  renderer.domElement.style.left = `${left}px`;
-  renderer.domElement.style.top = `${top}px`;
-  renderer.setSize(width, height);
-  camera.aspect = width / height;
-  camera.position.z = Math.max(14.8, 6.5 / Math.tan(Math.PI / 8) / camera.aspect);
-  camera.updateProjectionMatrix();
-}
-addEventListener('resize', resizeGame);
-resizeGame();
+// ---------- 启动 ----------
+const firstLevel = Math.min(progress.unlocked, LEVELS.length) - 1;
+startLevel(firstLevel, { banner: false });
+ui.showMap(progress, null, false);
+frame();
 
-restart();
-animate();
-
-// 调试钩子（用于自动化测试）
+// 自动化测试钩子
 window.__match3 = {
-  grid, camera, colX, rowY, ROWS, COLS,
-  get level() { return level; }, get energy() { return energy; }, get ice() { return [...ice]; }, get collected() { return collected; }, get gameOver() { return gameOver; }, get won() { return won; },
-  get busy() { return busy; }, get score() { return score; }, get moves() { return moves; },
-  types: () => grid.map(row => row.map(g => g ? g.userData.type : null)),
-  // 检查每个宝石的视觉位置是否与逻辑格子一致
-  consistent: () => grid.every((row, r) => row.every((g, c) => g && g.userData.r === r && g.userData.c === c &&
-    Math.abs(g.position.x - colX(c)) < 0.01 && Math.abs(g.position.y - rowY(r)) < 0.01)),
-  findMove: () => {
-    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) for (const [dr, dc] of [[0, 1], [1, 0]]) {
-      const r2 = r + dr, c2 = c + dc; if (r2 >= ROWS || c2 >= COLS) continue;
-      swapCells({ r, c }, { r: r2, c: c2 }); const ok = findMatches().size > 0; swapCells({ r, c }, { r: r2, c: c2 });
-      if (ok) return [[r, c], [r2, c2]];
+  get game() { return game; },
+  get busy() { return busy; },
+  get levelIndex() { return levelIndex; },
+  get display() { return display; },
+  get progress() { return progress; },
+  start: (i, banner = false) => startLevel(i, { banner }),
+  setSpeed: s => { timeScale = s; },
+  screenOf: (r, c) => toScreen(posOf(r, c)),
+  viewCount: () => views.size,
+  // 直接修改引擎状态后，按当前棋盘重建全部模型
+  rebuildViews: () => {
+    for (const v of views.values()) board.remove(v);
+    views.clear();
+    for (const cell of game.cells) {
+      if (cell.piece) makeView(cell.piece).position.copy(posOf(cell.r, cell.c));
+      setObstacle(cell.i, 'ice', cell.ice);
+      setObstacle(cell.i, 'crate', cell.crate);
+      setObstacle(cell.i, 'vine', cell.vine ? 1 : 0);
     }
-    return null;
+    syncDisplay();
+    refreshHUD();
   },
-  clickCell: (r, c) => {
-    const v = new THREE.Vector3(colX(c), rowY(r), 0.2).project(camera);
-    const rect = renderer.domElement.getBoundingClientRect();
-    renderer.domElement.dispatchEvent(new PointerEvent('pointerdown', { clientX: rect.left + (v.x + 1) / 2 * rect.width, clientY: rect.top + (1 - v.y) / 2 * rect.height, bubbles: true }));
-  },
+  renderInfo: () => ({ ...renderer.info.render, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures }),
+  profile: () => { const t0 = performance.now(); renderer.render(scene, camera); const t1 = performance.now(); return t1 - t0; },
+  // 每个棋子都有模型，且模型停在对应格子上
+  consistent: () => game.cells.every(cell => {
+    if (!cell.piece) return true;
+    const v = views.get(cell.piece.id);
+    return v && v.position.distanceTo(posOf(cell.r, cell.c)) < 0.02;
+  }) && views.size === game.cells.filter(c => c.piece).length,
 };
